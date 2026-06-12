@@ -1,22 +1,8 @@
 """チェックポインタからの会話履歴復元。"""
 
-from typing import Any
-
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-
-def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content) if content is not None else ""
+from app.agent.parsing import content_to_text as _content_to_text
 
 
 def _to_api_message(msg: BaseMessage) -> dict | None:
