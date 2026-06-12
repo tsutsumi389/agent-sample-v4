@@ -20,6 +20,7 @@
 | Web | **FastAPI 0.136.3 + uvicorn[standard] 0.49.0** | FastAPI 0.135+ ネイティブSSE (`fastapi.sse.EventSourceResponse`) を採用、sse-starlette 不要 |
 | LLM (チャット+ツール) | **ChatOllama `gpt-oss`** | `num_ctx=32768`, `reasoning="medium"` |
 | LLM (メモリ抽出) | **ChatOllama `qwen3`** | gpt-oss は構造化出力 (trustcall) が不安定。抽出は tool-calling が堅牢な qwen3 を採用 (`reasoning="low"`) |
+| LLM (制御・判断) | **ChatOllama `qwen3`** (`control_model`) | orchestrator/planner/evaluator の構造化判断系。`num_ctx=8192`, `reasoning=False` |
 | 埋め込み | **OllamaEmbeddings `nomic-embed-text`** | **768次元** (pgvector / store index の dims=768 に厳密一致) |
 | DB | **PostgreSQL (pgvector/pgvector:pg17)** | Store のベクトルインデックスに pgvector が必須。プレーン postgres では `CREATE EXTENSION vector` が失敗する |
 | チェックポインタ | **AsyncPostgresSaver** (langgraph-checkpoint-postgres 3.1.0) | 会話スレッドの永続化 |
@@ -80,21 +81,45 @@ kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row}
 ### 4.3 MCP ローダー (mcp/loader.py) — もう一つのプラガブルの中核
 `mcp_servers.json` (Claude Desktop 互換の `{"mcpServers": {...}}` 形状) を読み、`${ENV_VAR}` を環境変数で置換し、transport を自動補完 (`command` あれば `stdio`、`url` あれば `http`) して `MultiServerMCPClient` に渡す。`tool_name_prefix=True` でサーバ名プレフィックスを付け、ネイティブツールとの名前衝突を防ぐ。`get_tools()` はステートレス (呼び出しごとに新規セッション) なので起動時に一括取得して問題ない。**JSONに1エントリ足すだけで MCP サーバが追加される。**コア変更不要。
 
-### 4.4 エージェントファクトリ (agent/graph.py)
+### 4.4 マルチエージェントグラフ (agent/graph.py)
+
+オーケストレーター / プランナー / エグゼキューター / エヴァリュエーターの4役構成の StateGraph。
+**LLM の性能に依存せず複雑なタスクを完走させる**ため、ルーティング・ループ・終了判定はすべて
+コード側 (条件付きエッジの純関数 `routing.py`) が決定論的に制御する。
+
 ```
-all_tools = registry.all()                       # ネイティブ (自動探索)
-          + langmem_hotpath_tools()              # manage/search memory
-          + await mcp_client.get_tools()         # MCP (JSON設定)
-agent = create_agent(
-    model=ChatOllama(gpt-oss, num_ctx=32768, reasoning="medium", temperature=0),
-    tools=all_tools,
-    system_prompt=SYSTEM_PROMPT,                 # 起動時にユーザープロフィールを注入する版は middleware で
-    context_schema=AgentContext(user_id),
-    checkpointer=checkpointer, store=store,
-)
+START → orchestrator ─┬→ responder → END                          (高速パス)
+                      └→ planner → executor → evaluator ─┬→ executor    (retry / 次ステップ)
+                                                          ├→ planner     (replan)
+                                                          └→ synthesizer → END
 ```
+
+| ノード | モデル | 役割 |
+|--------|--------|------|
+| orchestrator | qwen3 (`control_model`) | ターン開始時のスクラッチ状態リセット＋DIRECT/PLAN の1語分類。短文 (`router_skip_under_chars` 未満) は LLM を呼ばず direct |
+| responder | gpt-oss | 高速パス。単一エージェント時代と同一の ReAct (`create_agent` をノード直付け、全ツール＋LangMem＋スレッド全履歴) |
+| planner | qwen3 | goal をステップ列に分解 (JSON)。会話全履歴は渡さない |
+| executor | gpt-oss | 現在ステップをツール付き ReAct で実行。毎ステップ新規スクラッチパッド (スレッド履歴非共有、`checkpointer=False`) |
+| evaluator | qwen3 | ステップ結果を pass/retry/replan 判定。retry/replan の予算超過は fail にダウングレード |
+| synthesizer | gpt-oss | ステップ結果を統合して最終回答 (AIMessage) を生成 |
+
+**モデル非依存の堅牢化 (全経路が END 到達を保証):**
+
+| ノード | 失敗時の決定論フォールバック |
+|--------|------------------------------|
+| orchestrator | `route="direct"` (現行挙動へ縮退) |
+| planner | 単一ステップ計画 `[goal]` (単一 ReAct へ縮退) |
+| executor | 打ち切りマーカー付き結果で続行 (例外を漏らさない) |
+| evaluator | `verdict="pass"` (前進フォールバック) |
+| synthesizer | ステップ結果の機械的連結 AIMessage |
+
+- 構造化出力は使わず、プレーンテキストからの堅牢 JSON 抽出 (`parsing.py`: `<think>` 除去 → フェンス → raw_decode 走査) ＋リトライ＋フォールバック。
+- 停止性: executor 通過ごとに `executor_runs` が単調増加し `max_executor_runs` で無条件に synthesizer へ。retry は `max_step_retries`、replan は `max_replans` で fail に格下げ。二重防御として親グラフに `graph_recursion_limit` を明示。
+- State (`state.py`) は `messages` のみ意味的に永続。計画・進捗等は orchestrator が毎ターン `fresh_scratch()` でリセットするターン内スクラッチ (制御フィールドは全て `NotRequired` で旧チェックポイント互換)。
+- コンテキスト管理: planner/evaluator は goal＋結果要約のみ (qwen3 は `num_ctx=8192`)。executor は毎ステップ約8Kトークン以内に切詰め。スレッド全履歴を見るのは responder のみ。
 - `AgentContext` は `@dataclass` で `user_id` を持つ。invoke 時に `context=AgentContext(user_id=...)` で渡す (config の `configurable` ではなく `context`)。
 - ただし LangMem の namespace テンプレート `{langgraph_user_id}` は **config から** 解決されるため、invoke 時には config に `configurable.langgraph_user_id` も併せて渡す (両方プラミングする)。
+- executor は `checkpointer=False` のため、ステップ途中でプロセスが落ちると当該ステップは再開不可 (単一エージェント時代と同等の許容範囲)。plan 経路では中間ツールやり取りはスレッド履歴に残らない (最終回答＋失敗の明示のみ残る)。
 
 ### 4.5 長期記憶 (memory/manager.py + memory/tools.py) — LangMem
 **ハイブリッド (collection-style) 採用:**
@@ -107,7 +132,13 @@ agent = create_agent(
 > **背景統合の限界 (明記):** ReflectionExecutor はインプロセスのバックグラウンドスレッドで動くため、プロセスが落ちると保留中の debounce タスクは失われる (best-effort)。v1 では許容する。
 
 ### 4.6 ストリーミングブリッジ (services/streaming.py)
-`agent.astream(..., stream_mode=["messages","updates","custom"], version="v2")` を使い、統一された `StreamPart` dict (`{"type","ns","data"}`) を SSE イベントへ変換する。`messages` → token、`updates` → tool_call / tool_result、`custom` → progress。`version="v2"` に統一し、v1 のタプル形式とは混在させない。
+`agent.astream(..., stream_mode=["messages","updates","custom"], subgraphs=True)` を使い、`(ns, mode, chunk)` の3タプルを SSE イベントへ変換する。`messages` → token、`updates` → tool_call / tool_result、`custom` → progress。
+
+マルチエージェント対応の要点:
+- **トークンフィルタ (二重防御):** 内部思考ノード (orchestrator/planner/evaluator/executor) のモデルは `tags=["nostream"]` で発生源から配信抑制し、さらにブリッジ側で `USER_FACING_NODES` (responder/synthesizer) 由来のみ token として emit する。
+- **dedupe:** responder サブグラフはサブグラフ内 updates と親レベル updates (全履歴の再掲) の両方でメッセージが届くため、親レベル側はスキップし、tool_call/tool_result は id で重複排除する。
+- **executor の可視性:** executor 内部の tool_call/tool_result は進捗として SSE に流すが、リフレクション対象 (turn_messages) には含めない。
+- **progress:** 各ノードの custom writer は必ず `status` (string) を含む dict を emit する規約。dict はそのまま `progress` の data として透過する (旧クライアントは `status` だけ読めば従来どおり)。
 
 ## 5. データモデル / 永続化
 

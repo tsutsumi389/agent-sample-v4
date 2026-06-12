@@ -33,5 +33,6 @@ async def chat_stream(
         thread_id=body.thread_id,
         user_id=body.user_id,
         reflection_delay_seconds=state.settings.reflection_delay_seconds,
+        settings=state.settings,
     ):
         yield event

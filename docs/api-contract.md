@@ -107,10 +107,19 @@ HTTP 4xx/5xx 時:
 
 | event | data (JSON) | 発生タイミング |
 |-------|-------------|----------------|
-| `token` | `{"content": "Hel", "node": "model"}` | LLMトークン差分ごと (`content` は差分文字列、`node` は emit ノード名) |
+| `token` | `{"content": "Hel", "node": "responder"}` | LLMトークン差分ごと (`content` は差分文字列、`node` は emit ノード名: `responder` または `synthesizer`) |
 | `tool_call` | `{"id": "call_abc", "name": "web_search", "args": {"query":"..."}}` | アシスタントがツール呼び出しを確定したとき |
 | `tool_result` | `{"id": "call_abc", "name": "web_search", "content": "晴れ, 25℃"}` | ツール実行結果が出たとき (`content` は最大2000字に切り詰め) |
-| `progress` | `{"status": "memories を検索中..."}` | (任意) custom writer からの進捗 |
+| `progress` | `{"status": "計画を作成しました (2ステップ)", ...}` | (任意) custom writer からの進捗。`status` (string) は必須。マルチエージェント進捗の拡張キーは下表参照 (**すべて optional** — 旧クライアントは `status` だけ読めば従来どおり動く) |
+
+**`progress` の拡張フィールド (すべて optional):**
+
+| key | 型 | 内容 |
+|-----|----|------|
+| `phase` | string | `routing` \| `plan` \| `step` \| `evaluate` \| `synthesize` |
+| `plan` | `[{"id": 1, "description": "..."}]` | 計画確定時のステップ一覧 (`phase: "plan"` のとき) |
+| `step` / `total` | number | 実行中ステップ番号 / 総ステップ数 (`phase: "step"` のとき) |
+| `verdict` | string | `pass` \| `retry` \| `replan` \| `fail` (`phase: "evaluate"` のとき) |
 | `done` | `{"thread_id": "t_3f9a...", "title": "東京の天気について"}` | ストリーム正常終了。`title` はサーバが更新した最新タイトル (初回は自動生成、無変更なら既存値) |
 | `error` | `{"message": "..."}` | 例外発生。直後にストリームを閉じる |
 
