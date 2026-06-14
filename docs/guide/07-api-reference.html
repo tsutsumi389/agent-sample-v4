@@ -239,18 +239,21 @@ sequenceDiagram
 </pre><figcaption>図1: チャット送信から SSE イベント受信までの流れ。404 はストリーム開始前に返る。</figcaption></figure>
 
 <h3>SSE イベントの種類</h3>
-<p>SSE は <code>event:</code> 行でイベント名、<code>data:</code> 行で本文（JSON）を運びます。本 API が送るイベントは次の4種類です。フィールド名は厳密にこの通りです。</p>
+<p>SSE は <code>event:</code> 行でイベント名、<code>data:</code> 行で本文（JSON）を運びます。本 API が送るイベントは次の5種類です。フィールド名は厳密にこの通りです。</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>event</th><th>data の中身</th><th>意味</th></tr></thead>
 <tbody>
 <tr><td><code>token</code></td><td><code>{content, node}</code></td><td>応答テキストの断片。<code>node</code> は生成元で <code>responder</code> または <code>synthesizer</code></td></tr>
 <tr><td><code>tool_call</code></td><td><code>{id, name, args}</code></td><td>エージェントがツールを呼び出した</td></tr>
+<tr><td><code>ui_resource</code></td><td><code>{id, name, component, mode, props, v}</code></td><td>ツールが返した対話的UI（生成的UI）。同一 <code>id</code> で <code>tool_call</code> → <code>ui_resource</code> → <code>tool_result</code> の順に届く</td></tr>
 <tr><td><code>tool_result</code></td><td><code>{id, name, content}</code></td><td>ツールの実行結果。<code>content</code> は<strong>最大2000字に切り詰め</strong></td></tr>
 <tr><td><code>progress</code></td><td><code>{status, ...}</code></td><td>進捗通知。<code>status</code> は必須、その他は拡張フィールド（任意）</td></tr>
 </tbody>
 </table>
 </div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title"><code>ui_resource</code> イベント（生成的UI）</p><p>ツールが <code>@tool(response_format="content_and_artifact")</code> でUI封筒（<code>{kind:"ui", component, props}</code>）を返すと、<code>ui_resource</code>（<code>{id, name, component, mode, props, v}</code>）として配信されます。フロントは <code>component</code> 名でホワイトリスト解決し、<code>table</code>/<code>chart</code>/<code>card</code>/<code>form</code> を描画、未知 <code>component</code> や未知イベントは無視・フォールバックされる（前方互換）。テキスト要約は従来どおり <code>tool_result</code> に乗ります。全体設計は <a href="11-generative-ui.html">チャット内GUI（生成的UI）</a> を参照してください。</p></div></aside>
 
 <h3>progress イベントの拡張フィールド</h3>
 <p><code>progress</code> は <code>status</code> 以外に状況を表す任意フィールドを持てます。<strong>すべて optional</strong>で、状況に応じて一部だけ付きます。</p>

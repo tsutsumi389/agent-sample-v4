@@ -49,6 +49,7 @@
 - [データモデルと永続化](docs/guide/08-data-model.html)
 - [フロントエンド設計](docs/guide/09-frontend.html)
 - [セットアップと運用](docs/guide/10-setup.html)
+- [チャット内GUI（生成的UI）](docs/guide/11-generative-ui.html) — ツールが返すUI封筒をチャット内にReactで描画する仕様（Claude Artifacts / MCP Apps 参考）
 
 ## 前提
 
