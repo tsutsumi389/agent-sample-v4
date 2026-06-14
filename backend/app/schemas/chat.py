@@ -3,7 +3,9 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, Field, field_serializer
+
+from app.memory.forget import DEFAULT_MAX_KEYS
 
 
 def _iso_z(dt: datetime) -> str:
@@ -75,3 +77,33 @@ class ToolsOut(BaseModel):
 
 class DeletedOut(BaseModel):
     deleted: bool = True
+
+
+class ForgetPreviewIn(BaseModel):
+    query: str
+    user_id: str = "default-user"
+    limit: int = 20
+
+
+class ForgetCandidate(BaseModel):
+    key: str
+    content: str
+    score: float | None = None
+    updated_at: str | None = None
+
+
+class ForgetPreviewOut(BaseModel):
+    candidates: list[ForgetCandidate]
+
+
+class ForgetConfirmIn(BaseModel):
+    # max_length は confirm 経路でも大量削除の安全弁 (DEFAULT_MAX_KEYS) を効かせるため。
+    # 超過時は 422 で拒否し、唯一の不可逆パスを保護する。
+    keys: list[str] = Field(max_length=DEFAULT_MAX_KEYS)
+    user_id: str = "default-user"
+
+
+class ForgetConfirmOut(BaseModel):
+    deleted_count: int
+    verified: bool
+    leaked_keys: list[str]

@@ -39,7 +39,7 @@
 <tbody>
 <tr><td>左</td><td><code>Sidebar</code></td><td>会話スレッドの一覧表示・新規作成・削除。クリックで表示するスレッドを切り替える。</td></tr>
 <tr><td>中央</td><td><code>ChatView</code></td><td>選択中スレッドの会話表示と、メッセージ送信・SSE 受信によるリアルタイム表示。</td></tr>
-<tr><td>右</td><td><code>MemoryPanel</code></td><td>AI が長期記憶として覚えている内容（メモリ）の一覧・検索・削除。</td></tr>
+<tr><td>右</td><td><code>MemoryPanel</code></td><td>AI が長期記憶として覚えている内容（メモリ）の一覧・検索・削除・一括忘却。</td></tr>
 </tbody>
 </table>
 </div>
@@ -114,6 +114,8 @@ flowchart TD
 <tr><td><code>deleteThread(threadId, userId)</code></td><td><span class="badge b-del">DELETE</span></td><td>スレッドを削除</td></tr>
 <tr><td><code>listMemories(userId, query?, limit)</code></td><td><span class="badge b-get">GET</span></td><td>記憶を一覧・検索（既定 limit=20）</td></tr>
 <tr><td><code>deleteMemory(key, userId)</code></td><td><span class="badge b-del">DELETE</span></td><td>記憶を 1 件削除</td></tr>
+<tr><td><code>forgetPreview(userId, query, limit)</code></td><td><span class="badge b-post">POST</span></td><td>一括忘却の候補を取得（非破壊）</td></tr>
+<tr><td><code>forgetConfirm(userId, keys)</code></td><td><span class="badge b-post">POST</span></td><td>承認した記憶を一括削除し検証</td></tr>
 <tr><td><code>listTools()</code></td><td><span class="badge b-get">GET</span></td><td>利用可能なツール一覧を取得</td></tr>
 </tbody>
 </table>
@@ -196,6 +198,7 @@ sequenceDiagram
 
 <h2>AI の記憶パネル（MemoryPanel）</h2>
 <p><code>MemoryPanel</code> は、AI が長期記憶として覚えている内容を一覧・検索・削除する右ペインです。<code>refreshKey</code> という props が増えるたびに <code>load()</code> を呼んで再取得します。<code>App</code> は会話の <code>done</code> ごとにこのキーを増やすため、会話のたびに記憶表示が更新されます。検索欄にキーワードを入れて検索すると、ベクトル検索のスコア（関連度）が各項目に表示されます。記憶の仕組みそのものは <a href="04-memory.html">記憶アーキテクチャ</a> を参照してください。</p>
+<p>各記憶の「削除」ボタンは 1 件ずつの削除です。これに加えて、検索欄の下の「<strong>この検索結果をまとめて忘れる</strong>」ボタンで<strong>スコープ付き一括忘却</strong>ができます。押すと <code>forgetPreview</code> で削除候補を取得し、<strong>確認モーダル</strong>を開きます（この時点では削除しません）。モーダルでは候補がチェックボックス付きで並び、外せば残せます。「N件を忘れる」を押すと <code>forgetConfirm</code> が実削除と検証を行い、結果をパネル上部の通知に表示します。検証で <code>verified=false</code> のときは「一部の記憶が残っている可能性」を警告します。削除は不可逆なので、この確認モーダルは必須の安全装置です（設計は <a href="04-memory.html">記憶アーキテクチャ</a>、API は <a href="07-api-reference.html">APIリファレンス</a> を参照）。</p>
 <aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">記憶は少し遅れて反映される</p><p>パネルにも注記があるとおり、会話内容が記憶に統合されるのはバックグラウンド処理で 30 秒ほどかかります。直近の発言がすぐ記憶に出てこなくても正常です。</p></div></aside>
 
 <h2>Vite 開発サーバと proxy</h2>

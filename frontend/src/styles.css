@@ -586,3 +586,97 @@ button {
   color: var(--danger);
   border-color: var(--danger);
 }
+
+.btn.memory-forget-all {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.btn.memory-forget-all:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.memory-notice {
+  margin: 10px 10px 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* --- 一括忘却の確認モーダル --- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(440px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.modal-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.modal-list {
+  flex: 1;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.modal-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.modal-item input {
+  margin-top: 2px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn.modal-danger {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn.modal-danger:hover:not(:disabled) {
+  opacity: 0.9;
+}
