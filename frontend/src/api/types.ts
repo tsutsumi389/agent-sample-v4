@@ -36,6 +36,25 @@ export interface ToolInfo {
   source: string;
 }
 
+// --- スコープ付き一括忘却 (POST /api/memory/forget/*) ---
+
+export interface ForgetCandidate {
+  key: string;
+  content: string;
+  score: number | null;
+  updated_at: string | null;
+}
+
+export interface ForgetPreviewResult {
+  candidates: ForgetCandidate[];
+}
+
+export interface ForgetConfirmResult {
+  deleted_count: number;
+  verified: boolean;
+  leaked_keys: string[];
+}
+
 // --- SSE イベント (POST /api/chat/stream) ---
 
 export interface TokenEvent {

@@ -81,7 +81,7 @@ flowchart LR
 <p>① は会話の流れの中でエージェントが「これは覚えておこう」「あれって何だっけ」と判断して実行するため、結果がツールの実行ログやメモリパネルにすぐ現れます（ツールの可視化については<a href="05-streaming.html">ストリーミング設計</a>を参照）。② はユーザーを待たせずに、会話全体を後から振り返って事実を抽出します。役割が補完的なので、両方を併用します。</p>
 
 <h2>会話中の記憶（hot-path）</h2>
-<p>hot-path（ホットパス、＝ユーザーを待たせる「主経路」）では、エージェントに2つの記憶ツールを持たせます。実装は <code>backend/app/memory/tools.py</code> の <code>langmem_hotpath_tools()</code> で、<code>create_manage_memory_tool</code>（保存・更新・削除用）と <code>create_search_memory_tool</code>（検索用）の2つを返すだけのシンプルな構成です。どちらにも同じ <code>namespace</code> と <code>store</code> を渡します。</p>
+<p>hot-path（ホットパス、＝ユーザーを待たせる「主経路」）では、エージェントに記憶ツールを持たせます。実装は <code>backend/app/memory/tools.py</code> の <code>langmem_hotpath_tools()</code> で、<code>create_manage_memory_tool</code>（保存・更新・削除用）と <code>create_search_memory_tool</code>（検索用）に加え、後述する <code>build_forget_tool</code>（スコープ付き一括忘却用）の3つを返します。いずれにも同じ <code>namespace</code> と <code>store</code> を渡します。</p>
 
 <pre class="code-label">backend/app/memory/tools.py</pre>
 <pre><code>MEMORY_NAMESPACE = ("memories", "{langgraph_user_id}")
@@ -90,6 +90,7 @@ def langmem_hotpath_tools(store: BaseStore) -&gt; list[BaseTool]:
     return [
         create_manage_memory_tool(namespace=MEMORY_NAMESPACE, store=store),
         create_search_memory_tool(namespace=MEMORY_NAMESPACE, store=store),
+        build_forget_tool(store),  # スコープ付き一括忘却 (2段階・確認ゲート付き)
     ]
 </code></pre>
 
@@ -174,7 +175,39 @@ sequenceDiagram
 
 <p>取得した各記憶は、<code>key</code> / <code>content</code> / <code>namespace</code> / <code>updated_at</code> / <code>score</code> を持つ辞書に整形されます。<code>content</code> は <code>_to_text()</code> ヘルパで人間が読める文字列に変換されます。これは LangMem が記憶を <code>{"kind": ..., "content": {...}}</code> のような入れ子の形で持つことがあるため、<code>content</code> キーを再帰的にたどってテキスト化するためです。なお <code>updated_at</code> は <code>_iso_z()</code> で UTC の ISO 形式（末尾 <code>Z</code>）に揃えられます。</p>
 
-<p>記憶の削除は <code>delete_memory()</code> が担当し、<code>store.adelete(("memories", user_id), key)</code> で指定した <code>key</code> の1件を消します。これらの関数がフロントの<a href="07-api-reference.html">API</a>から呼ばれ、<a href="09-frontend.html">フロントエンド</a>のメモリパネルに反映されます。</p>
+<p>記憶の削除は <code>delete_memory()</code> が担当し、<code>store.adelete(("memories", user_id), key)</code> で指定した <code>key</code> の1件を消します。これらの関数がフロントの<a href="07-api-reference.html">API</a>から呼ばれ、<a href="09-frontend.html">フロントエンド</a>のメモリパネルに反映されます。1件ずつではなく「<strong>仕事の話は全部忘れて</strong>」のようにまとめて忘れたいときは、次に説明するスコープ付き一括忘却を使います。</p>
+
+<h2>長期記憶を忘れる（スコープ付き一括忘却）</h2>
+<p>「覚える」だけでなく「<strong>忘れる</strong>」のも長期記憶の大事な機能です。ユーザーが「私の住所は忘れて」「仕事の話はもうしないで」と言ったとき、関連する記憶を意味検索でまとめて消せる必要があります。ただし削除は<strong>不可逆</strong>なので、雑に自動削除すると大事な情報まで巻き込んで消してしまいます。そこでこのエージェントは、誤削除を防ぐために<strong>2段階の確認ゲート</strong>と<strong>削除後の検証</strong>を挟む設計にしています。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  Q["忘れる対象<br/>(自然文クエリ)"] --> SC["search_forget_candidates<br/>(意味検索で候補抽出)"]
+  SC --> SEL["select_candidates<br/>(上限25件にクリップ)"]
+  SEL --> CONF{"確認ゲート<br/>ユーザー/エージェントの承認"}
+  CONF -->|"承認"| DEL["batch_delete_memories<br/>(一括削除)"]
+  CONF -.->|"却下"| X["何もしない"]
+  DEL --> VER["verify_forgotten<br/>(各記憶を直接照会しAbsence検証)"]
+  VER --> R["deleted_count / verified / leaked_keys"]
+</pre><figcaption>図5: 一括忘却は「候補抽出 → 確認 → 削除 → 検証」の4段。確認ゲートを通らない限り1件も削除しない</figcaption></figure>
+
+<p>処理は <code>backend/app/memory/forget.py</code>（副作用のない<strong>純粋関数</strong>）と <code>backend/app/memory/store_query.py</code>（Store への I/O）に分かれています。純粋関数に切り出すことで、削除という危険な処理の判断ロジックを単体テストしやすくしています。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>段</th><th>関数</th><th>役割</th></tr></thead>
+<tbody>
+<tr><td>① 候補抽出</td><td><code>search_forget_candidates()</code></td><td>クエリに意味の近い記憶を検索し、<code>key</code>/<code>content</code>/<code>score</code> 付きの候補にする</td></tr>
+<tr><td>② 選別</td><td><code>select_candidates()</code></td><td>最大件数（既定 25 件 = <code>DEFAULT_MAX_KEYS</code>）でクリップ。暴走的な大量削除を防ぐ主たる安全弁。スコア閾値は任意の補助フィルタで既定は無効</td></tr>
+<tr><td>③ 削除</td><td><code>batch_delete_memories()</code></td><td>承認された <code>key</code> 群を一括で <code>adelete</code>。単一ストアなので孤児は出ない</td></tr>
+<tr><td>④ 検証</td><td><code>verify_forgotten()</code></td><td>削除後に各 <code>key</code> を <code>aget</code> で直接照会し、まだ取得できる（＝消えていない）記憶を <code>leaked_keys</code> として報告する</td></tr>
+</tbody>
+</table></div>
+
+<p>この4段は2つの入口から使われます。<strong>エージェント主導</strong>では、会話中にエージェントが <code>forget_memories</code> ツール（<code>build_forget_tool</code>）を呼びます。このツールは <code>confirm=false</code> なら候補一覧を返すだけで<strong>1件も削除しません</strong>。ユーザーに「これらを削除します。よろしいですか？」と提示して<strong>明示的な承認</strong>を得てから、同じクエリを <code>confirm=true</code> で呼んで初めて削除します。<strong>UI 主導</strong>では、メモリパネルの「まとめて忘れる」ボタンが <code>POST /api/memory/forget/preview</code>（候補取得・非破壊）→ チェックで対象選択 → <code>POST /api/memory/forget/confirm</code>（実削除＋検証）の順で同じ4段を辿ります（<a href="07-api-reference.html">API</a> / <a href="09-frontend.html">フロントエンド</a>参照）。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">なぜ「忘却曲線（減衰）」を採用しないのか</p><p>記憶の忘却というと、人間の<strong>エビングハウスの忘却曲線</strong>のように「時間が経つと自動で薄れて消える（time-based decay）」方式を思い浮かべるかもしれません。設計にあたり最新動向を調査しましたが、2025–2026 時点の本番システムでこの自動減衰を採用する例は限定的でした。理由は、減衰モデルは<strong>安全上重要な情報（アレルギー・約束・禁止事項など）まで誤って消してしまう</strong>リスクがあり、研究段階の手法が多いためです。本番の主流は、本実装のような<strong>明示的な削除＋確認＋検証</strong>と、会話後のバックグラウンド統合による上書き（暗黙的な更新）の組み合わせです。そこで本エージェントは、複雑で危険な自動減衰は採らず、「ユーザー/エージェントが意図して忘れる」確実な経路に振り切っています。</p></div></aside>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">確認なしの削除は禁止（不可逆）</p><p><code>forget_memories</code> ツールのプロンプトには「承認なしに <code>confirm=true</code> を呼んではならない」と明記しています。UI も必ず確認モーダルを挟みます。削除は復元できないため、確認ゲートは設計上の<strong>必須</strong>要素です。検証で <code>verified=false</code>（残存の可能性）が返ったときは、フロントが警告を表示します。</p></div></aside>
 
 <h2>namespace 設計</h2>
 <p>長期記憶のすべての保存・検索・削除は、<code>("memories", user_id)</code> という2要素の <code>namespace</code> を通して行われます。先頭の <code>"memories"</code> は記憶の種類を表す固定の名札で、2つ目の <code>user_id</code> によってユーザーごとに棚が完全に分かれます。これにより、あるユーザーの記憶が別のユーザーから見えることはありません。</p>
@@ -188,7 +221,7 @@ flowchart TB
   A --> A1["コーヒーが好き"]
   A --> A2["朝型である"]
   B --> B1["紅茶が好き"]
-</pre><figcaption>図5: namespace の2つ目を user_id にすることで、記憶がユーザー単位で分離される。v1 では default-user 一つだけが使われる</figcaption></figure>
+</pre><figcaption>図6: namespace の2つ目を user_id にすることで、記憶がユーザー単位で分離される。v1 では default-user 一つだけが使われる</figcaption></figure>
 
 <aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">namespace はバイト単位で一致させる</p><p><code>tools.py</code> のコメントにある通り、<code>MEMORY_NAMESPACE</code> は <code>manager.py</code> / <code>store_query.py</code> と<strong>バイト単位で一致</strong>させる必要があります（<a href="https://github.com/langchain-ai/langmem/issues/140">langmem#140</a>）。hot-path とバックグラウンド統合はプレースホルダ <code>"{langgraph_user_id}"</code> 付きの定数 <code>MEMORY_NAMESPACE</code> を共有し、メモリパネル取得側は実際の <code>user_id</code> を埋めた <code>("memories", user_id)</code> を使います。書き込み先と読み出し先がズレると記憶が見つからなくなるため、ここは慎重に揃えています。</p></div></aside>
 

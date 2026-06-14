@@ -1,4 +1,11 @@
-import type { Memory, MessageOut, Thread, ToolInfo } from "./types";
+import type {
+  ForgetConfirmResult,
+  ForgetPreviewResult,
+  Memory,
+  MessageOut,
+  Thread,
+  ToolInfo,
+} from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -67,6 +74,29 @@ export function deleteMemory(
     `/api/memory/${encodeURIComponent(key)}?user_id=${encodeURIComponent(userId)}`,
     { method: "DELETE" },
   );
+}
+
+export function forgetPreview(
+  userId: string,
+  query: string,
+  limit = 20,
+): Promise<ForgetPreviewResult> {
+  return request("/api/memory/forget/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, query, limit }),
+  });
+}
+
+export function forgetConfirm(
+  userId: string,
+  keys: string[],
+): Promise<ForgetConfirmResult> {
+  return request("/api/memory/forget/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, keys }),
+  });
 }
 
 export function listTools(): Promise<{ tools: ToolInfo[] }> {
