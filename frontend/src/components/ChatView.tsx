@@ -84,6 +84,10 @@ export function ChatView({ threadId, userId, onThreadCreated, onDone }: Props) {
   // (ロードするとローカルで組み立て中のメッセージが消えるため)。
   const skipLoadRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // ユーザーが最下部付近にいるかどうか。上にスクロールして読んでいる間は
+  // false になり、自動スクロールを抑止する (再レンダリングは不要なので ref)。
+  const atBottomRef = useRef(true);
   // ハンドラから現在表示中のスレッドを参照するためのミラー。
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
@@ -128,9 +132,56 @@ export function ChatView({ threadId, userId, onThreadCreated, onDone }: Props) {
     };
   }, [threadId, userId, stop]);
 
+  // 最下部付近にいるときだけ自動スクロールする。上に戻して読んでいる間は
+  // 強制スクロールしないことで、未読箇所を見られるようにする。
+  // ストリーミング中は更新が高頻度なため、smooth だとアニメーションが重なって
+  // 操作を奪い合うので instant スクロールにする。
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (atBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "auto" });
+    }
   }, [messages, progress]);
+
+  // スレッド切替時は最下部追従に戻す。
+  useEffect(() => {
+    atBottomRef.current = true;
+  }, [threadId]);
+
+  // ユーザーが上方向に操作した瞬間に追従を止める。位置ベースの判定だけだと
+  // プログラム側のスクロールと競合して反応が鈍るため、入力を直接拾う。
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) atBottomRef.current = false;
+    };
+    let lastTouchY = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      lastTouchY = e.touches[0]?.clientY ?? 0;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? 0;
+      if (y > lastTouchY) atBottomRef.current = false; // 下に指を動かす = 上スクロール
+      lastTouchY = y;
+    };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+  }, []);
+
+  // スクロール位置から最下部付近にいるかを判定する (最下部へ戻すと追従再開)。
+  const handleListScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const distanceFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 80) atBottomRef.current = true;
+  }, []);
 
   const handleSend = useCallback(
     async (text: string) => {
@@ -257,7 +308,7 @@ export function ChatView({ threadId, userId, onThreadCreated, onDone }: Props) {
 
   return (
     <main className="chat-view">
-      <div className="message-list">
+      <div className="message-list" ref={listRef} onScroll={handleListScroll}>
         {loadingHistory && <div className="chat-note">履歴を読み込み中...</div>}
         {!loadingHistory && messages.length === 0 && (
           <div className="chat-empty">
