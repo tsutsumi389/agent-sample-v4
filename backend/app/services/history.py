@@ -3,6 +3,7 @@
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from app.agent.parsing import content_to_text as _content_to_text
+from app.agent.ui import coerce_ui
 
 
 def _to_api_message(msg: BaseMessage) -> dict | None:
@@ -21,13 +22,18 @@ def _to_api_message(msg: BaseMessage) -> dict | None:
             ]
         return out
     if isinstance(msg, ToolMessage):
-        return {
+        out = {
             "role": "tool",
             "content": _content_to_text(msg.content),
             "id": msg.id,
             "tool_call_id": msg.tool_call_id,
             "name": msg.name,
         }
+        # ライブ stream と同じ coerce_ui を共有し、リロード復元でも UI を再水和する。
+        ui = coerce_ui(getattr(msg, "artifact", None), msg.tool_call_id or msg.id)
+        if ui is not None:
+            out["ui"] = ui
+        return out
     return None  # SystemMessage 等は API へ出さない
 
 

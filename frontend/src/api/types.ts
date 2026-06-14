@@ -13,6 +13,16 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
+// 生成的UI: ツールが返した UI 封筒 (backend coerce_ui の結果)。
+export interface UIResource {
+  id: string;
+  name?: string;
+  component: string;
+  mode: "declarative" | "iframe";
+  props: Record<string, unknown>;
+  v: number;
+}
+
 export interface MessageOut {
   role: "user" | "assistant" | "tool";
   content: string;
@@ -20,6 +30,7 @@ export interface MessageOut {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+  ui?: UIResource;
 }
 
 export interface Memory {
@@ -73,6 +84,9 @@ export interface ToolResultEvent {
   name: string;
   content: string;
 }
+
+// SSE ui_resource イベントの data。UIResource と同形。
+export type UIResourceEvent = UIResource;
 
 export interface ProgressEvent {
   status: string;

@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 from app.agent.context import AgentContext
 from app.agent.parsing import content_to_text as _content_to_text
+from app.agent.ui import coerce_ui
 from app.core.config import Settings
 from app.memory.manager import schedule_reflection
 from app.services import threads as threads_service
@@ -55,6 +56,7 @@ async def stream_agent(
     turn_messages: list[Any] = [HumanMessage(content=message)]
     seen_tool_calls: set[str] = set()
     seen_tool_results: set[str] = set()
+    seen_ui: set[str] = set()
     try:
         async for part in agent.astream(
             {"messages": [{"role": "user", "content": message}]},
@@ -119,6 +121,20 @@ async def stream_agent(
                         elif isinstance(msg, ToolMessage):
                             if accumulate:
                                 turn_messages.append(msg)
+                            # UI 封筒があれば tool_result の前に ui_resource を流す。
+                            # 同一 id への二重配信 (親レベル再掲) は seen_ui で防ぐ。
+                            ui = coerce_ui(
+                                getattr(msg, "artifact", None),
+                                msg.tool_call_id or msg.id,
+                            )
+                            if ui is not None:
+                                ukey = f"ui:{ui['id']}"
+                                if ukey not in seen_ui:
+                                    seen_ui.add(ukey)
+                                    yield ServerSentEvent(
+                                        event="ui_resource",
+                                        data={**ui, "name": msg.name},
+                                    )
                             key = str(msg.tool_call_id or msg.id)
                             if key in seen_tool_results:
                                 continue

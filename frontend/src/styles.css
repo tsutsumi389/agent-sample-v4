@@ -680,3 +680,162 @@ button {
 .btn.modal-danger:hover:not(:disabled) {
   opacity: 0.9;
 }
+
+/* ============================================================
+   生成的UI (チャット内GUI) — UIResource とセーフコンポーネント
+   ============================================================ */
+.ui-resources {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.ui-resource {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+}
+
+.ui-resource .ui-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+/* table */
+.ui-table .table-wrap {
+  overflow-x: auto;
+}
+.ui-table table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9em;
+}
+.ui-table th,
+.ui-table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.ui-table th {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* chart (棒グラフ) */
+.ui-chart-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-chart-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 28%) 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+.ui-chart-label {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-chart-track {
+  background: var(--bg-hover);
+  border-radius: 4px;
+  height: 14px;
+  overflow: hidden;
+}
+.ui-chart-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.ui-chart-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+/* card */
+.ui-card-title {
+  font-weight: 700;
+  font-size: 1.05em;
+  margin-bottom: 4px;
+}
+.ui-card-body {
+  margin: 4px 0 8px;
+  color: var(--text-dim);
+}
+.ui-card-fields {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+.ui-card-field {
+  display: flex;
+  gap: 8px;
+}
+.ui-card-field dt {
+  color: var(--text-dim);
+  min-width: 96px;
+  margin: 0;
+}
+.ui-card-field dd {
+  margin: 0;
+  color: var(--text);
+}
+
+/* form */
+.ui-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+  color: var(--text-dim);
+}
+.ui-form-field input,
+.ui-form-field textarea {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font: inherit;
+}
+.ui-form-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+.ui-form button {
+  align-self: flex-start;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font: inherit;
+  cursor: pointer;
+}
+.ui-form button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.ui-form button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ui-fallback {
+  color: var(--danger);
+  font-size: 0.85em;
+}
