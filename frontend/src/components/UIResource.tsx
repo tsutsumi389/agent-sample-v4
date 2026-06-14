@@ -186,6 +186,7 @@ function FormView({ props, onAction }: ViewProps) {
           <span>{f.label ?? f.name}</span>
           {f.type === "textarea" ? (
             <textarea
+              className="input ui-form-control"
               value={values[f.name] ?? ""}
               placeholder={f.placeholder}
               disabled={submitted}
@@ -195,6 +196,7 @@ function FormView({ props, onAction }: ViewProps) {
             />
           ) : (
             <input
+              className="input ui-form-control"
               type={f.type === "number" ? "number" : "text"}
               value={values[f.name] ?? ""}
               placeholder={f.placeholder}
@@ -206,7 +208,7 @@ function FormView({ props, onAction }: ViewProps) {
           )}
         </label>
       ))}
-      <button type="submit" disabled={submitted}>
+      <button type="submit" className="btn send ui-form-submit" disabled={submitted}>
         {submitted ? "送信済み" : submit_label}
       </button>
     </form>

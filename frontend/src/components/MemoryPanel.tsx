@@ -152,12 +152,20 @@ export function MemoryPanel({ userId, refreshKey }: Props) {
     <aside className="memory-panel">
       <div className="memory-header">
         <h2>AIの記憶</h2>
-        <p className="memory-note">
-          バックグラウンドの記憶統合には30秒ほどかかるため、最新の会話の内容は少し遅れて反映されます。
-        </p>
+        <details className="memory-note">
+          <summary>
+            <span className="memory-note-summary">
+              記憶の反映には少し時間がかかります
+            </span>
+          </summary>
+          <div className="memory-note-body">
+            バックグラウンドの記憶統合には30秒ほどかかるため、最新の会話の内容は少し遅れて反映されます。
+          </div>
+        </details>
         <div className="memory-search">
           <input
             type="text"
+            className="input"
             value={query}
             placeholder="記憶を検索..."
             onChange={(e) => setQuery(e.target.value)}

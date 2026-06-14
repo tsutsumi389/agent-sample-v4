@@ -261,13 +261,15 @@ export function ChatView({ threadId, userId, onThreadCreated, onDone }: Props) {
         {loadingHistory && <div className="chat-note">履歴を読み込み中...</div>}
         {!loadingHistory && messages.length === 0 && (
           <div className="chat-empty">
-            <p>メッセージを送信して会話を始めましょう。</p>
+            <h2>まだ何も憶えていません</h2>
+            <p>最初のひとことから、記憶の輪がひとつずつ結ばれていきます。</p>
           </div>
         )}
         {messages.map((m, i) => (
           <MessageBubble
             key={m.id}
             message={m}
+            continued={i > 0 && messages[i - 1].role === m.role}
             streaming={
               streaming &&
               threadId === streamingThreadId &&

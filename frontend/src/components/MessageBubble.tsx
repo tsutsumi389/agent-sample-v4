@@ -13,20 +13,29 @@ export interface UIMessage {
 interface Props {
   message: UIMessage;
   streaming?: boolean;
+  /** 直前のメッセージが同話者か。連続発話ではロールを省きリズムを締める。 */
+  continued?: boolean;
   /** 生成的UI上の操作 (フォーム送信等) をエージェントへ環流する。受理されたら true。 */
   onUIAction?: (a: UIAction) => boolean;
 }
 
-export function MessageBubble({ message, streaming = false, onUIAction }: Props) {
+export function MessageBubble({
+  message,
+  streaming = false,
+  continued = false,
+  onUIAction,
+}: Props) {
   // UI 封筒を持つツール呼び出しは GUI として展開描画し、それ以外はチップ表示。
   const uiCalls = message.toolCalls.filter((c) => c.ui);
   const chipCalls = message.toolCalls.filter((c) => !c.ui);
   return (
-    <div className={`message-row ${message.role}`}>
+    <div className={`message-row ${message.role}${continued ? " continued" : ""}`}>
       <div className={`message-bubble ${message.role}`}>
-        <div className="message-role">
-          {message.role === "user" ? "あなた" : "アシスタント"}
-        </div>
+        {!continued && (
+          <div className="message-role">
+            {message.role === "user" ? "あなた" : "アシスタント"}
+          </div>
+        )}
         {chipCalls.length > 0 && (
           <div className="tool-chips">
             {chipCalls.map((call) => (
