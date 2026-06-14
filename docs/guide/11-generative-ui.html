@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>チャット内GUI（生成的UI） — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>チャット内GUI（生成的UI）</span></nav>
+<h1>チャット内GUI（生成的UI）</h1>
+<p class="lead">本ページは、チャット応答の中にツールが「対話的なUI（テーブル・チャート・フォーム・カード等）」を埋め込む機能、いわゆる<strong>生成的UI（Generative UI）</strong>の確定仕様です。Claude Artifacts / MCP Apps / OpenAI Apps SDK / Vercel AI SDK の先行事例を調査し、本プロジェクトの「コア（<code>graph.py</code>）無改修でツールを置くだけ」という拡張哲学と、既存のSSEストリーミング契約（未知イベント無視・id dedupe・done/error排他）を一切壊さずに実現する方式へ落とし込みました。</p>
+
+<p>結論を先に述べます。UIリソースは LangChain 標準の <code>ToolMessage.artifact</code> を唯一の封筒（エンベロープ）とし、UIツールは <code>@tool(response_format=&quot;content_and_artifact&quot;)</code> で書くだけでよい。これにより checkpoint への永続化も自動で乗ります。MVPは「宣言的セーフコンポーネント方式（React側ホワイトリストで描画）」を採用し、任意HTML/JSを動かす「サンドボックスiframe方式」は封筒に <code>mode</code> フィールドを予約するだけで実装は将来に回します。初見の読者でも追えるよう、契約・シーケンス図・コード例・セキュリティ・既存設計書との整合を順に示します。</p>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">実装ステータス: MVP（宣言的方式）は実装済み</p><p>本仕様の MVP（A 宣言的セーフコンポーネント方式）は実装済みです。バックエンドは <span class="code-label">backend/app/agent/ui.py</span>（封筒 <code>is_ui_artifact</code>/<code>coerce_ui</code>/<code>ui()</code>）、<span class="code-label">backend/app/tools/ui_widgets.py</span>（<code>render_table</code>/<code>render_bar_chart</code>/<code>render_card</code>/<code>render_form</code>）、<span class="code-label">streaming.py</span>（<code>ui_resource</code> emit）、<span class="code-label">history.py</span>（再水和）、<span class="code-label">schemas/chat.py</span>（<code>MessageOut.ui</code>）。フロントは <span class="code-label">frontend/src/components/UIResource.tsx</span>（レジストリ + Table/Chart/Card/Form の各 View、Zod 検証）と、<span class="code-label">useChatStream.ts</span>/<span class="code-label">ChatView.tsx</span>/<span class="code-label">MessageBubble.tsx</span> の配線。<strong>B（サンドボックスiframe方式）は封筒の <code>mode</code> 予約のみで未実装</strong>です。</p></div></aside>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">前提</p><p>本ページは<a href="05-streaming.html">ストリーミング設計</a>の SSE 契約と、<a href="06-extensibility.html">拡張ガイド</a>の「ツールを置くだけ」哲学を土台にしています。先にその2ページを読むと、ここで「なぜ既存契約を壊さずに済むのか」がより明確になります。</p></div></aside>
+
+<h2>何を解決するのか（背景と原型）</h2>
+<p>現状のチャットはテキスト（Markdown）とツール呼び出しチップ（<code>ToolCallChip</code> の details 表示）しか描けません。表形式のデータ・グラフ・入力フォームのような「構造を持った情報」も、すべて文字列に潰してバブル内に流すしかありませんでした。生成的UIは、ツールが返す構造化データを、フロントで本物のReactコンポーネントとして描くことでこれを解決します。</p>
+
+<p>先行4事例から抽出した原型は次のとおりです。それぞれ「UIをどう届け」「ホストとUIがどう往復し」「本プロジェクトに何を示唆するか」を整理しました。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>事例</th><th>UIの届け方</th><th>ホスト⇔UIの往復</th><th>本プロジェクトへの示唆</th></tr></thead>
+<tbody>
+<tr><td>Claude Artifacts</td><td>LLMが生成したコード塊を別ペインのライブプレビューで描画</td><td>双方向は薄い（基本表示専用、CSPで網羅遮断）</td><td>信頼できない生成コードはプロセス分離＋厳格CSPで隔離する</td></tr>
+<tr><td>MCP Apps (ext-apps 2026-01-26)</td><td><code>ui-scheme</code> のMCPリソース(HTMLテンプレ)を事前宣言、ツールが <code>resourceUri</code> で指す</td><td>二重iframe + postMessage越し JSON-RPC 2.0</td><td><code>content</code>(モデル文脈用テキスト)と <code>structuredContent</code>(UI用データ)の分離思想。未知ホストでもテキストで前方互換</td></tr>
+<tr><td>OpenAI Apps SDK</td><td>meta <code>openai-outputTemplate</code> がHTML(JSバンドル内包)を指す</td><td><code>window.openai</code> グローバル注入 + postMessage</td><td>データ取得ツールと描画ツールの分離。<code>setWidgetState</code> によるUIローカル状態保持</td></tr>
+<tr><td>Vercel AI SDK</td><td>iframe無し同一オリジン。ツール名→Reactコンポーネント直マップ</td><td>ブリッジはストリーム自体（新ツール呼出/メッセージ送信で往復）</td><td>自前ホストでコンポーネントが信頼できる場合の最有力モデル。input/output 状態遷移が既存 tool_call/tool_result と同型</td></tr>
+</tbody>
+</table></div>
+
+<p>本プロジェクトには外部ホスト（Claude.ai 等）が存在せず、<strong>自前のReact+FastAPIアプリそのものがホスト</strong>です。したがって、UIを描くコンポーネントは自前資産であり信頼境界の内側にあります。これは Vercel 流の「ツール由来データをクライアントの既定コンポーネントが描く」方式が最も軽く安全に成立することを意味します。RSC版 <code>streamUI</code> が開発停止し「サーバがUIコードを流すのではなくデータを流す」方式が現行推奨になった事実も、この方向性を裏付けます。</p>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">重要な割り切り</p><p>MVPでは「コンポーネントは自前＝信頼できる」「propsデータだけがツール/LLM由来＝検証対象」という信頼境界を引きます。これにより iframe隔離なしで安全に描画でき、実装が最小になります。</p></div></aside>
+
+<h2>二層アーキテクチャと、MVPの推奨</h2>
+<p>信頼境界に応じて描画方式を2層に分けます。</p>
+
+<h3>（A）宣言的セーフコンポーネント方式 — MVP採用</h3>
+<p>フロントがホワイトリストレジストリ（<code>table</code> / <code>chart</code> / <code>form</code> / <code>card</code>）を持ち、封筒の <code>component</code> 名で解決して対応Reactコンポーネントを描きます。</p>
+<ul>
+<li><code>props</code> は型検証（Zod）を通してから渡す。任意HTML/JSは一切実行しない。XSS面はゼロ。</li>
+<li>既存の <code>tool_call</code>（実行中＝input-available相当）→ <code>tool_result</code>（完了＝output-available相当）の2段状態遷移をそのまま流用できる。</li>
+<li>未知の <code>component</code> 名は従来の <code>ToolCallChip</code> にフォールバック（前方互換）。</li>
+</ul>
+
+<h3>（B）サンドボックスiframe方式 — 封筒に mode を予約、実装は将来</h3>
+<ul>
+<li><code>mode:&quot;iframe&quot;</code> のとき、任意HTML/JSを <code>sandbox</code> 属性 + CSP + オリジン分離で隔離描画し、postMessage越し JSON-RPC でUI⇔ホストを往復させる（MCP Apps 仕様 2026-01-26 準拠）。</li>
+<li>外部MCPサーバが <code>ui-scheme</code> リソースを宣言する将来や、ホワイトリストで賄えない任意UIに備える。</li>
+</ul>
+
+<p>MVPに（A）を強く推奨する理由は4つです。</p>
+<ol>
+<li><strong>信頼境界の一致:</strong> 描画コンポーネントは自前資産で信頼できる。隔離が不要なので最も軽い。</li>
+<li><strong>既存契約の再利用:</strong> <code>tool_call</code>/<code>tool_result</code> の2段遷移、id dedupe、未知イベント無視がそのまま効く。改修は分岐追加のみ。</li>
+<li><strong>ローカル完結・無認証v1との整合:</strong> 任意HTML/JS実行はLLM/MCP由来の悪性スクリプトという攻撃面を持ち込むが、無認証ローカルv1では割に合わない。</li>
+<li><strong>段階的拡張:</strong> 封筒に <code>mode</code> フィールドだけ予約しておけば、（B）は後から非破壊で追加できる。</li>
+</ol>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TB
+  subgraph Backend["バックエンド (FastAPI + LangGraph)"]
+    Tool["@tool(response_format=<br/>content_and_artifact)"]
+    TM["ToolMessage<br/>content=要約 / artifact=UI封筒"]
+    CP[("AsyncPostgresSaver<br/>checkpoints")]
+    ST["streaming.py<br/>coerce_ui()"]
+    HS["history.py<br/>coerce_ui()"]
+    Tool --> TM --> CP
+    TM --> ST
+    CP --> HS
+  end
+  subgraph Frontend["フロント (React)"]
+    REG["REGISTRY<br/>(table/chart/form/card)"]
+    A["(A) 宣言的セーフ<br/>Reactで直接描画 — MVP"]
+    B["(B) iframe sandbox<br/>任意HTML/JS — 将来"]
+    REG --> A
+    REG -.将来.-> B
+  end
+  ST -- "SSE: ui_resource" --> REG
+  HS -- "GET messages: ui" --> REG
+</pre><figcaption>図1: 二層アーキテクチャ。判定純関数 coerce_ui がバックエンドのライブ stream と履歴復元の両方を貫き、フロントは REGISTRY で component を解決する。MVP は (A) のみ実装し (B) は予約。</figcaption></figure>
+
+<h2>UIリソースの契約（封筒の型）</h2>
+<p>UIリソースは LangChain 既存機構 <code>ToolMessage.artifact</code> を唯一の封筒とします。新しいテーブルも別保存経路も作りません。封筒の型 <code>UIEnvelope</code> は <span class="code-label">backend/app/agent/ui.py</span> に新設します。</p>
+
+<p>封筒（<code>artifact</code> に格納される dict）の構造は次のとおりです。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>キー</th><th>型</th><th>必須</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>v</code></td><td><code>int</code></td><td>必須</td><td>スキーマ版（=1）。将来の破壊的変更に備える</td></tr>
+<tr><td><code>kind</code></td><td><code>str</code></td><td>必須</td><td>固定値 <code>&quot;ui&quot;</code>。これがUI封筒の判定キー</td></tr>
+<tr><td><code>component</code></td><td><code>str</code></td><td>必須</td><td>描画コンポーネント名（<code>table</code>/<code>chart</code>/<code>card</code>/<code>form</code> 等）</td></tr>
+<tr><td><code>props</code></td><td><code>dict</code></td><td>必須</td><td>コンポーネントへ渡すデータ。UI描画用の完全データ</td></tr>
+<tr><td><code>mode</code></td><td><code>&quot;declarative&quot;|&quot;iframe&quot;</code></td><td>任意</td><td>既定 <code>declarative</code>。<code>iframe</code> は将来用に予約</td></tr>
+<tr><td><code>ui_id</code></td><td><code>str</code></td><td>任意</td><td>指定なければ stream/history 側で <code>tool_call_id</code> を流用</td></tr>
+</tbody>
+</table></div>
+
+<p><strong>なぜ <code>uri(ui://...)</code> や <code>mimeType</code> を持たないか:</strong> MCP Apps は外部サーバのUIテンプレを事前宣言・プリフェッチするため <code>ui-scheme</code> のURIとMIMEが要ります。本プロジェクトは自前ホストでコンポーネントが手元にあるため、URIで「どこから取るか」を指す必要がなく、<code>component</code> 名で「どれで描くか」を指せば十分です。将来（B）で外部MCPの <code>ui-scheme</code> を取り込む際は、その封筒を本封筒へ正規化する変換層（<code>coerce_ui</code>）でURI→component解決を吸収します。</p>
+
+<p><span class="code-label">backend/app/agent/ui.py</span> に置く純関数です。<code>streaming.py</code> と <code>history.py</code> の両方から呼び、判定ロジックを一元化（＝DRY）します。</p>
+<span class="code-label">backend/app/agent/ui.py</span>
+<pre><code>UI_SCHEMA_VERSION = 1
+
+def is_ui_artifact(artifact: object) -&gt; bool:
+    return (
+        isinstance(artifact, dict)
+        and artifact.get("kind") == "ui"
+        and isinstance(artifact.get("component"), str)
+        and isinstance(artifact.get("props"), dict)
+    )
+
+def coerce_ui(artifact: object, tool_call_id: str | None) -&gt; dict | None:
+    """artifact をUI封筒へ正規化。UI でなければ None。"""
+    if not is_ui_artifact(artifact):
+        return None
+    a = artifact  # type: ignore[assignment]
+    return {
+        "id": a.get("ui_id") or tool_call_id,
+        "component": a["component"],
+        "mode": a.get("mode", "declarative"),
+        "props": a["props"],
+        "v": a.get("v", UI_SCHEMA_VERSION),
+    }</code></pre>
+
+<p>判定が <code>artifact</code> ベースであるため、ネイティブツールでもMCPツールでも、<code>artifact</code> が <code>kind=="ui"</code> の dict でありさえすれば同一経路でUI化できます。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p><code>content</code>(要約テキスト)と <code>props</code>(UIデータ)の分離は MCP Apps の <code>structuredContent</code>/<code>content</code> 分離と同思想です。LLMの後続文脈には <code>content</code> の要約だけが渡り、巨大な <code>props</code> 辞書はコンテキストを汚しません。本プロジェクトの <code>tool_result</code> 2000字制限（<a href="05-streaming.html">ストリーミング設計</a>参照）と完全に同じ「安全とコストの境界」です。</p></div></aside>
+
+<h2>UIツール作成API（コア無改修哲学の維持）</h2>
+<p>設計原則は「新しいデコレータも基底クラスも発明しない」。LangChain 標準の <code>@tool(response_format=&quot;content_and_artifact&quot;)</code> をそのまま使わせます。<code>registry.py</code> の自動探索は <code>isinstance(obj, BaseTool)</code> で拾うため、<code>app/tools/</code> にファイルを置くだけで自動登録され、<code>graph.py</code> もregistryも無改修で動きます。</p>
+
+<p><strong>環境確認済み:</strong> <code>backend/.venv</code> は langchain_core 1.4.6 / langchain 1.3.8。<code>response_format=&quot;content_and_artifact&quot;</code> は戻り値 <code>(text, artifact)</code> の <code>artifact</code> を <code>ToolMessage.artifact</code> へ格納し、<code>model_dump()</code> でシリアライズ可能（＝checkpoint へ自動永続化）です。</p>
+
+<span class="code-label">backend/app/tools/ui_table.py</span>
+<pre><code>from langchain_core.tools import tool
+from app.agent.ui import ui  # 薄いヘルパー(任意)
+
+@tool(response_format="content_and_artifact")
+def render_table(title: str, columns: list[str], rows: list[list[str]]):
+    """表データを対話的テーブルとして表示する。"""
+    # 第1要素(content)=LLM文脈用の要約、第2要素(artifact)=UI封筒
+    return ui("table", summary=f"{title}: {len(rows)}行の表を表示",
+              title=title, columns=columns, rows=rows)</code></pre>
+
+<p>利便性のための薄いヘルパー（必須ではありません）。<code>UIEnvelope</code> 組み立ての定型を吸収するだけです。</p>
+<span class="code-label">backend/app/agent/ui.py</span>
+<pre><code>def ui(component: str, *, summary: str, mode: str = "declarative", **props):
+    """UIツールの戻り値 (content, artifact) を組み立てる。"""
+    return summary, {"v": UI_SCHEMA_VERSION, "kind": "ui",
+                     "component": component, "mode": mode, "props": props}</code></pre>
+
+<p><strong><code>summary</code>(content)の役割と規約:</strong> <code>artifact</code> は LLM に見えません（<code>content</code> のみ後続文脈へ渡る）。要約が貧弱だとモデルが「何を表示したか」を後続ターンで誤認します。UIツールの <code>content</code> は必ず意味のある日本語要約にすること（規約）。<code>content_to_text</code> は <code>artifact</code> を無視するため、executor のスクラッチパッド要約（<code>step_result</code>）にも影響しません。</p>
+
+<p><strong>MCPの扱い:</strong> <code>mcp_servers.json</code> への1行追加哲学は不変です。MCPツールが将来 <code>artifact</code> を返せば同経路でUI化、返さなければ従来テキスト。loader/registry の改修は不要です。</p>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">拡張ポイントがそのまま効く</p><p>「<code>app/tools/</code> にファイルを置くだけ」「<code>mcp_servers.json</code> に1行足すだけ」という既存の2大拡張ポイント（<a href="06-extensibility.html">拡張ガイド</a>）が、UIでも完全にそのまま機能します。これが artifact 方式を選ぶ核心的な利点です。</p></div></aside>
+
+<h2>新SSEイベント ui_resource と発行経路</h2>
+<p>新イベント名 <code>ui_resource</code> を1種だけ追加します。<code>tool_result</code>（最大2000字テキスト要約）は据え置き、UIは別イベントで構造化データとして分離します（前方互換）。SSEは順序保証されるため、同一 <code>id</code> に対し <code>tool_call</code> → <code>ui_resource</code> → <code>tool_result</code> の順で届きます。フロントは <code>id</code> で既存 <code>toolCall</code> に <code>ui</code> を後付けできます。</p>
+
+<p><code>emit</code> のトリガ箇所は <span class="code-label">backend/app/services/streaming.py</span> の <code>mode==&quot;updates&quot;</code> の <code>ToolMessage</code> 分岐（現状119-135行）に1分岐追加するのみです。関数冒頭に <code>seen_ui: set[str] = set()</code> を新設し、<code>tool_result</code> の yield 直前にUI封筒を流します。</p>
+
+<span class="code-label">backend/app/services/streaming.py</span>
+<pre><code>elif isinstance(msg, ToolMessage):
+    if accumulate:
+        turn_messages.append(msg)
+    ui = coerce_ui(getattr(msg, "artifact", None), msg.tool_call_id)
+    if ui is not None:
+        ukey = f"ui:{ui['id']}"
+        if ukey not in seen_ui:
+            seen_ui.add(ukey)
+            yield ServerSentEvent(event="ui_resource",
+                                  data={**ui, "name": msg.name})
+    # 既存 tool_result はそのまま続行（要約テキストは常に流す）
+    key = str(msg.tool_call_id or msg.id)
+    if key in seen_tool_results:
+        continue
+    seen_tool_results.add(key)
+    yield ServerSentEvent(event="tool_result", data={...})  # 既存のまま</code></pre>
+
+<p><strong>dedupe:</strong> 既存 <code>seen_tool_results</code>（<code>tool_call_id</code> 基準）と同様に <code>seen_ui</code> を <code>ui:{id}</code> キーで新設します。responder が親レベル update（全履歴の再掲）とサブグラフ内 updates で二重配信する既存問題は、<code>ui_resource</code> も既存の <code>ns==()</code> スキップと <code>accumulate</code> ガードと同じ経路を通るため自動的に守られます。ただしテスト（<code>test_streaming_bridge.py</code>）に二重配信ケースの追加が必要です。</p>
+
+<p><strong>前方互換:</strong> <code>useChatStream.ts</code> の <code>dispatch()</code> switch は <code>default: break</code> で未知イベントを既に無視しています（114行）。<code>ui_resource</code> ハンドラを追加するまでフロント旧版でも無害です。逆にバックエンド旧版に対しフロント新版も、イベントが来ないだけで安全。<code>done</code>/<code>error</code> 排他、id dedupe の既存規約をそのまま新イベントにも適用します。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  participant U as ユーザー
+  participant FE as フロント (useChatStream)
+  participant ST as streaming.py
+  participant G as LangGraph (graph.py 無改修)
+  participant T as UIツール
+  U->>FE: メッセージ送信
+  FE->>ST: POST /api/chat/stream
+  ST->>G: agent.astream(...)
+  G->>T: ツール呼び出し
+  Note over G,FE: updates(AIMessage.tool_calls)
+  G-->>ST: tool_call
+  ST-->>FE: event: tool_call (実行中)
+  T-->>G: (summary, ui封筒) を返す
+  Note over ST: coerce_ui(artifact)
+  G-->>ST: ToolMessage(content+artifact)
+  ST-->>FE: event: ui_resource (props)
+  ST-->>FE: event: tool_result (要約2000字)
+  FE->>FE: id一致の toolCall に ui 後付け→描画
+  ST-->>FE: event: done
+</pre><figcaption>図2: UIツール1回分のSSEシーケンス。同一 id に tool_call → ui_resource → tool_result の順で届き、フロントは id 一致で後付け描画する。tool_result は据え置きで常に流れる。</figcaption></figure>
+
+<p>SSE として送られる新旧イベントの形は次のとおりです。<code>ui_resource</code> は構造化UIデータ、<code>tool_result</code> は据え置きの要約テキストで、両者は併存します。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>event</th><th>data の形</th><th>向き</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td><span class="badge b-sse">ui_resource</span></td><td><code>{ id: string(tool_call_id または ui_id), name?: string, component: string, mode: &quot;declarative&quot;|&quot;iframe&quot;, props: object, v: number }</code></td><td>server→client</td><td>ツールが返した構造化UIデータ（封筒）をフロントへ届け、id一致の <code>tool_call</code> に後付けして宣言的レンダラで描画させる。<code>tool_result</code>(要約テキスト)とは別イベントで分離し前方互換を維持。<code>tool_call</code>→<code>ui_resource</code>→<code>tool_result</code> の順で同一idに届く</td></tr>
+<tr><td><span class="badge b-sse">tool_result</span></td><td><code>{ id: string, name: string, content: string(最大2000字) }</code></td><td>server→client</td><td>変更なし（据え置き）。UIツールでも要約テキストは従来通り常に流す。<code>ui_resource</code> と併存し、UI非対応の旧フロントはこれだけ読めば従来描画になる（前方互換）</td></tr>
+</tbody>
+</table></div>
+
+<h2>UI→エージェントの往復経路</h2>
+<p>SSEは下り一方向のため、ボタン/フォーム操作等の上り経路が別途必要です。2案を比較し、<strong>案2を推奨</strong>します。</p>
+
+<h3>案1（非推奨）新エンドポイント POST /api/chat/ui-action</h3>
+<p><code>{thread_id, user_id, ui_id, action, payload}</code> を受け、サーバ側でアクションを <code>ToolMessage</code> 等へ変換して再 invoke します。</p>
+<p><strong>短所:</strong> グラフへの注入点を新設する必要があり「コア無改修」を破ります。アクション→メッセージ変換の独自プロトコルが増え、決定論制御の表面積が拡大。checkpoint との整合（どの状態に追記するか）が複雑になります。</p>
+
+<h3>案2（推奨）chat/stream へ構造化メッセージ再投入</h3>
+<p>UI操作を <code>ChatRequest.message</code> に載せ、既存の <code>POST /api/chat/stream</code> を再利用します（<a href="07-api-reference.html">APIリファレンス</a>）。</p>
+<ul>
+<li>フロントは操作を人間可読＋機械可読な1メッセージに整形して送る。例: フォーム送信 → <code>message = '[ui-action] form#&lt;ui_id&gt;: {&quot;name&quot;:&quot;...&quot;}'</code>。</li>
+<li>バックエンドは新コード不要。orchestrator が自然言語/JSON混在メッセージとして処理（<code>parsing.py</code> の <code>extract_json</code> が JSON 部を堅牢抽出）。</li>
+<li>スレッド継続・checkpoint・履歴・リフレクションすべて既存経路に乗る。シングルユーザv1・決定論重視に最も合致。</li>
+</ul>
+
+<p><strong>揺れの抑制（任意の後方互換拡張）:</strong> <code>ChatRequest</code> に <code>ui_action: dict | None = None</code> を既定 <code>None</code> で追加してよい。旧クライアント無影響です。これがあれば <code>streaming.py</code> 冒頭で <code>if body.ui_action: message = format_ui_action(...)</code> と定型整形でき、フロントの文字列整形をサーバへ寄せて非決定性を抑えられます。</p>
+
+<p><strong>MVP実装:</strong> <code>ChatRequest</code> 無改修で「整形済みメッセージを <code>send()</code> に渡す」だけ。<code>UIResource</code> の <code>onAction</code> が <code>ChatView</code> の <code>handleSend(formatUiAction(...))</code> を呼ぶ最小実装で成立します。</p>
+
+<p><strong>app限定アクションの概念（将来）:</strong> MCP Apps の <code>visibility:app</code> 相当の「モデル文脈に出さないUI専用アクション」を導入し、リフレッシュ/ページング/フォーム送信がエージェント文脈やマルチエージェントのトークンを汚さないようにする余地を残します。</p>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">非決定性に注意</p><p>案2は LLM が <code>ui-action</code> メッセージを自然言語として再解釈するため、整形が緩いと非決定的になり得ます。<code>ChatRequest.ui_action</code> 構造化フィールド＋<code>streaming</code> 冒頭の定型整形で揺れを抑えるのが望ましい。</p></div></aside>
+
+<h2>永続化と履歴リロード時の再水和</h2>
+<p><strong>永続化（追加実装ほぼ不要）:</strong> UIリソースは <code>ToolMessage.artifact</code> に入り、<code>AsyncPostgresSaver</code> の checkpoint にメッセージの一部として自動保存されます（<a href="08-data-model.html">データモデルと永続化</a>）。別テーブル・別保存経路は不要。これが artifact 方式を選ぶ最大の利点です。</p>
+
+<p><code>MessageOut</code> を後方互換で拡張します。</p>
+<span class="code-label">backend/app/schemas/chat.py</span>
+<pre><code>class MessageOut(BaseModel):
+    ...
+    ui: dict[str, Any] | None = None   # 後方互換 (既定 None)</code></pre>
+<p><code>threads.py</code> で <code>response_model_exclude_none=True</code> を指定済みのため、UIなしメッセージのレスポンスは一切変化せず前方互換です。</p>
+
+<p>履歴復元の再水和は <code>_to_api_message()</code> の <code>ToolMessage</code> 分岐に追加します。判定は <code>streaming.py</code> と<strong>同じ <code>coerce_ui</code> を共有</strong>し、ライブstreamとリロード復元の完全一致を保証します。</p>
+<span class="code-label">backend/app/services/history.py</span>
+<pre><code>if isinstance(msg, ToolMessage):
+    out = {"role": "tool", "content": _content_to_text(msg.content),
+           "id": msg.id, "tool_call_id": msg.tool_call_id, "name": msg.name}
+    ui = coerce_ui(getattr(msg, "artifact", None), msg.tool_call_id)
+    if ui is not None:
+        out["ui"] = ui
+    return out</code></pre>
+
+<p><strong>フロント <code>toUIMessages</code></strong>（<code>ChatView.tsx</code> 19-54行）: tool メッセージ処理で <code>m.ui</code> があれば、突合先の <code>UIToolCall</code> に <code>ui</code> を後付け（現状 <code>call.result = m.content</code> と同じ箇所）。孤立 tool でも対応します。これでリロード後もUIが再描画されます。</p>
+
+<p><strong>UIローカル状態の保持（将来）:</strong> 軽い状態（タブ選択・展開状態等）は <code>ui_id</code> をキーに <code>localStorage</code>。ユーザの労力がかかる状態（フォーム下書き等）は LangGraph checkpoints や LangMem store へ app限定アクション経由で保存。OpenAI の <code>setWidgetState</code> 相当を自前提供する設計余地を残します。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">executor 経由UIの注意</p><p>executor サブグラフ（<code>checkpointer=False</code>、親 messages 非共有）内でUIツールが呼ばれると <code>ToolMessage</code> が永続化されません。MVPでは UIツールは高速パス responder 経由でのみ確実に永続化される点に留意してください。executor 経由UIは synthesizer のテキスト要約に縮約されます。</p></div></aside>
+
+<h2>React描画とレジストリ</h2>
+<p>まず型を追加します。SSE <code>ui_resource</code> の data 形と <code>MessageOut.ui</code> を共通の <code>UIResource</code> で表します。</p>
+<span class="code-label">frontend/src/api/types.ts</span>
+<pre><code>export interface UIResource {
+  id: string; name?: string; component: string;
+  mode: "declarative" | "iframe";
+  props: Record&lt;string, unknown&gt;; v: number;
+}
+export type UIResourceEvent = UIResource;  // SSE ui_resource の data</code></pre>
+<p><code>MessageOut</code> に <code>ui?: UIResource</code> を、<code>UIToolCall</code>（<code>ToolCallChip.tsx</code>）に <code>ui?: UIResource</code> を追加します。</p>
+
+<p><strong>SSEハンドラ</strong>（<code>useChatStream.ts</code>）: <code>StreamHandlers</code> に <code>onUIResource?: (e: UIResourceEvent) =&gt; void</code> を追加、<code>dispatch</code> switch に <code>case &quot;ui_resource&quot;</code> を追加。<code>ChatView</code> の <code>handleSend</code> に <code>onUIResource</code> を実装し、<code>updateMessage</code> で該当 <code>assistantId</code> の <code>toolCalls</code> 内（id一致）に <code>ui</code> を後付け、無ければメッセージ直下の <code>uiResources</code> 配列へ。</p>
+
+<p><strong>新コンポーネント</strong>（<code>UIResource.tsx</code>）: <code>component</code> 名でホワイトリスト解決する宣言的レンダラ。未知 <code>component</code> は <code>ToolCallChip</code> にフォールバック（前方互換＝コア無改修のフロント版）。</p>
+<span class="code-label">frontend/src/components/UIResource.tsx</span>
+<pre><code>const REGISTRY: Record&lt;string, React.FC&lt;{ props: unknown; onAction: (a: unknown) =&gt; void }&gt;&gt; = {
+  table: TableView, chart: ChartView, card: CardView, form: FormView,
+};
+export function UIResource({ res, onAction }: { res: UIResource; onAction: (a: unknown) =&gt; void }) {
+  if (res.mode === "iframe") return &lt;SandboxFrame res={res} onAction={onAction} /&gt;; // 将来
+  const C = REGISTRY[res.component];
+  if (!C) return &lt;ToolCallChip call={{ id: res.id, name: res.name ?? res.component, args: {} }} /&gt;;
+  // props は各 View 内で Zod 検証してから使う
+  return &lt;div className="ui-resource"&gt;&lt;C props={res.props} onAction={onAction} /&gt;&lt;/div&gt;;
+}</code></pre>
+
+<p><strong><code>MessageBubble.tsx</code>:</strong> tool-chips 描画の隣で、<code>ui</code> を持つ <code>toolCall</code> は <code>ToolCallChip</code> でなく <code>UIResource</code> を描画（チップは details で内訳、UIは展開表示）。react-markdown のテキストとGUIパートは <code>MessageBubble</code> 内で共存させます。<code>onAction</code> は <code>ChatView</code> 経由で前述の往復経路（案2 <code>handleSend(formatUiAction)</code>）へ接続します。</p>
+
+<p><strong>props 検証（coding-style 準拠）:</strong> 各 View は Zod スキーマで <code>props</code> を parse してから描きます。検証失敗時はフォールバック表示。これにより MCP由来の無検証 <code>props</code> による XSS/プロトタイプ汚染を防ぎます。</p>
+
+<p><strong>追加依存:</strong> chart は recharts 等（既存 react-markdown と同様の追加ライブラリ）。フロント全体の構成は<a href="09-frontend.html">フロントエンド設計</a>を参照してください。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  SSE["event: ui_resource"] --> CV["ChatView<br/>onUIResource"]
+  HIST["GET messages<br/>m.ui"] --> CV
+  CV --> MB["MessageBubble"]
+  MB --> UR["UIResource.tsx"]
+  UR -->|component一致| REG{"REGISTRY"}
+  REG --> TBL["TableView"]
+  REG --> CHT["ChartView"]
+  REG --> CRD["CardView"]
+  REG --> FRM["FormView"]
+  UR -->|未知 component| FB["ToolCallChip<br/>(フォールバック)"]
+  FRM -->|onAction| CV2["handleSend(formatUiAction)"]
+  CV2 -->|POST /api/chat/stream| SSE
+</pre><figcaption>図3: フロントの描画フロー。ライブ SSE と履歴 GET の双方が ChatView に集約され、REGISTRY で component を解決。未知名は ToolCallChip へフォールバック。フォームの onAction は chat/stream へ環流する。</figcaption></figure>
+
+<h2>セキュリティ</h2>
+<p><strong>MVP（A 宣言的方式）の安全性</strong></p>
+<ul>
+<li>任意HTML/JSを一切実行しない。<code>component</code> 名はホワイトリスト解決のみ、未知名はフォールバック。XSS面はゼロ。</li>
+<li><code>props</code> は各 View 内で Zod 検証してから使う。MCP/LLM由来の不正データ・プロトタイプ汚染を防ぐ。</li>
+<li><code>content</code>(要約2000字相当)と <code>props</code>(UIデータ)の分離で、巨大データがLLM文脈へ混入するコスト/安全境界を維持。</li>
+<li><strong>props 肥大化対策:</strong> table の <code>rows</code> 等が大きいと SSE/checkpoint/履歴APIが肥大する。<code>tool_result</code> の2000字制限に相当する上限（行数/バイト数）を <code>props</code> にも設け、超過時はサーバ側でページネーション or 要約する（要検討事項）。</li>
+</ul>
+
+<p><strong>将来（B iframe方式）に導入するセキュリティ機構</strong>（MCP Apps 基準、実装は後回し）</p>
+<ul>
+<li><strong>二重iframeサンドボックス:</strong> ホスト→外側プロキシiframe(別オリジン)→内側iframe(untrusted UI)。FastAPI に別オリジン相当のサンドボックス配信エンドポイント（例 <code>GET /sandbox/proxy</code>）を追加し、外側が postMessage を双方向中継・検証する。</li>
+<li><strong>sandbox属性:</strong> 内側iframeは <code>allow-scripts</code> のみから始め、必要分だけ <code>allow-forms</code> 等を足す。<code>allow-same-origin</code> は隔離を弱めるため原則付与しない（別オリジン＋別iframeで補償）。</li>
+<li><strong>隔離の能動検証:</strong> <code>window.top</code> アクセスが <code>SecurityError</code> を投げることで隔離成立を確認する。</li>
+<li><strong>オリジン検証:</strong> 受信側は <code>event.origin</code> が想定ホストオリジンと一致するか必ず確認し、想定外を破棄。返信先も明示originで送りワイルドカード禁止。</li>
+<li><strong>CSP:</strong> metaタグより改竄耐性の高いHTTPヘッダでFastAPIが付与。restrictive-by-default（<code>default-src 'none'</code>）とし、connect/resource/frame/baseUri の各ドメインを宣言的に許可。未宣言なら外部接続ゼロ＝ネットワーク遮断が既定。</li>
+<li><strong>ストレージ遮断:</strong> Claude Artifacts 流に <code>localStorage</code>/<code>sessionStorage</code> をブロック。通信は postMessage越し JSON-RPC のみで全往復を監査可能にし、UIはホストDOM/Cookie/ストレージへ直接アクセス不可とする。</li>
+<li><strong>権限明示:</strong> 必要なら camera/microphone/geolocation/clipboard を iframe <code>allow</code> 属性で個別許可（MCP の <code>meta.ui.permissions</code> 相当）。</li>
+</ul>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">無認証ローカルv1では B方式は割に合わない</p><p>無認証ローカルv1では、任意HTML/JS実行（B方式）は LLM/MCP由来の悪性スクリプトという攻撃面を持ち込み割に合いません。MVPは A方式に限定し、封筒に <code>mode</code> フィールドだけ予約して B の実装は後回しにするのが安全な既定方針です。</p></div></aside>
+
+<h2>ライフサイクル全体（生成から再水和まで）</h2>
+<p>UIリソースの一生は次の5段階です。<strong>emit</strong>（生成）、<strong>live render</strong>（ライブ描画）、<strong>interact</strong>（操作で往復）、<strong>persist</strong>（永続化）、<strong>rehydrate</strong>（リロード再水和）。ライブstreamとリロード復元はどちらも同じ <code>coerce_ui</code> 純関数を通るため、表示結果が完全一致します。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  participant U as ユーザー
+  participant FE as React (ChatView/UIResource)
+  participant API as FastAPI
+  participant ST as streaming.py
+  participant G as LangGraph
+  participant T as UIツール
+  participant DB as checkpoints(Postgres)
+
+  Note over U,DB: 1) 生成 emit
+  U->>FE: 送信
+  FE->>API: POST /api/chat/stream
+  API->>ST: stream_agent()
+  ST->>G: astream
+  G->>T: 呼び出し
+  T-->>G: (summary, ui封筒)
+  G-->>DB: ToolMessage(content+artifact) 自動保存
+  ST-->>FE: tool_call → ui_resource → tool_result
+
+  Note over U,FE: 2) ライブ描画 render
+  FE->>FE: REGISTRY[component]+Zod検証で描画
+
+  Note over U,DB: 3) 操作で往復 interact
+  U->>FE: フォーム送信/ボタン
+  FE->>API: POST /api/chat/stream ([ui-action]整形message)
+  API->>G: 既存経路で再 invoke (コア無改修)
+  ST-->>FE: 新たな token/ui_resource/done
+
+  Note over U,DB: 4) 永続化 persist (自動)
+  G-->>DB: 全 ToolMessage が checkpoint に蓄積
+
+  Note over U,DB: 5) 再水和 rehydrate
+  U->>FE: スレッド再選択 / リロード
+  FE->>API: GET /api/threads/{id}/messages
+  API->>DB: aget_state → history.py coerce_ui
+  API-->>FE: MessageOut(ui=封筒)
+  FE->>FE: toUIMessages で ui を toolCall に後付け→再描画
+</pre><figcaption>図4: UIリソースのライフサイクル全体。生成・描画・操作・永続化・再水和の5段階。ライブと復元が同じ coerce_ui を通るため、リロード後も表示が完全一致する。</figcaption></figure>
+
+<h2>実装インパクトの一覧（チェックリスト）</h2>
+<p>確定仕様に基づく改修対象と性質を整理します。<strong>コア（<code>graph.py</code> / routing / nodes）は無改修</strong>です。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>対象ファイル</th><th>変更内容</th><th>性質</th></tr></thead>
+<tbody>
+<tr><td><span class="code-label">backend/app/agent/ui.py</span>（新規）</td><td><code>UIEnvelope</code>定義 / <code>is_ui_artifact</code> / <code>coerce_ui</code> / <code>ui()</code> ヘルパー</td><td>追加</td></tr>
+<tr><td><span class="code-label">backend/app/tools/ui_*.py</span>（新規）</td><td>UIツール本体（<code>@tool content_and_artifact</code>）</td><td>追加（置くだけ自動登録）</td></tr>
+<tr><td><span class="code-label">backend/app/services/streaming.py</span></td><td><code>ToolMessage</code>分岐に <code>ui_resource</code> emit ＋ <code>seen_ui</code> dedupe</td><td>1分岐追加</td></tr>
+<tr><td><span class="code-label">backend/app/services/history.py</span></td><td><code>_to_api_message</code> の <code>ToolMessage</code> に <code>ui</code> 付与</td><td>数行追加</td></tr>
+<tr><td><span class="code-label">backend/app/schemas/chat.py</span></td><td><code>MessageOut.ui</code>（既定None）/ 任意 <code>ChatRequest.ui_action</code></td><td>後方互換追加</td></tr>
+<tr><td><span class="code-label">backend/app/tools/registry.py</span></td><td>無改修（<code>isinstance(BaseTool)</code>で自動登録）</td><td>変更なし</td></tr>
+<tr><td><span class="code-label">backend/app/agent/graph.py</span></td><td>無改修</td><td>変更なし</td></tr>
+<tr><td><span class="code-label">frontend/src/api/types.ts</span></td><td><code>UIResource</code> / <code>UIResourceEvent</code> / <code>MessageOut.ui</code></td><td>追加</td></tr>
+<tr><td><span class="code-label">frontend/src/hooks/useChatStream.ts</span></td><td><code>onUIResource</code> ハンドラ ＋ <code>case &quot;ui_resource&quot;</code></td><td>分岐追加</td></tr>
+<tr><td><span class="code-label">frontend/src/components/ChatView.tsx</span></td><td><code>onUIResource</code> 実装 / <code>toUIMessages</code> で <code>ui</code> 後付け / <code>onAction</code>→<code>handleSend</code></td><td>追加</td></tr>
+<tr><td><span class="code-label">frontend/src/components/UIResource.tsx</span>（新規）</td><td>ホワイトリストレジストリ＋フォールバック</td><td>追加</td></tr>
+<tr><td><span class="code-label">frontend/src/components/{Table,Chart,Card,Form}View.tsx</span>（新規）</td><td>各セーフコンポーネント（Zod検証）</td><td>追加</td></tr>
+<tr><td><span class="code-label">frontend/src/components/MessageBubble.tsx</span></td><td><code>ui</code> を持つ <code>toolCall</code> は <code>UIResource</code> を描画</td><td>分岐追加</td></tr>
+<tr><td><span class="code-label">backend tests（test_streaming_bridge.py 等）</span></td><td><code>ui_resource</code> emit / 二重配信 dedupe / 再水和一致</td><td>追加</td></tr>
+</tbody>
+</table></div>
+
+<p>旧クライアント・旧サーバとの組み合わせはすべて「イベントが来ない/フィールドが増えない」だけで無害（前方・後方互換）です。</p>
+
+<h2>MVPスコープ</h2>
+<p>v1 で確実に実装する範囲です。</p>
+<ul>
+<li>UIリソースの封筒（<code>UIEnvelope</code>: <code>v</code>/<code>kind</code>/<code>component</code>/<code>props</code>、任意 <code>mode</code>/<code>ui_id</code>）を <code>backend/app/agent/ui.py</code> に定義し、<code>is_ui_artifact</code> / <code>coerce_ui</code> 純関数を <code>streaming.py</code> と <code>history.py</code> で共有する</li>
+<li>UIツールは <code>@tool(response_format=&quot;content_and_artifact&quot;)</code> で記述し、<code>app/tools/</code> に置くだけで <code>registry.py</code> の <code>isinstance(BaseTool)</code> 自動登録に乗せる（<code>graph.py</code>/registry 無改修）</li>
+<li>薄いヘルパー <code>ui(component, summary=..., **props)</code> を提供（必須ではない利便API）</li>
+<li>新SSEイベント <code>ui_resource</code> を <code>streaming.py</code> の <code>ToolMessage</code> 分岐に1つ追加。<code>seen_ui</code> で <code>ui:{id}</code> dedupe、<code>tool_result</code> は据え置きで両方流す</li>
+<li>宣言的セーフコンポーネント方式(A)のみ実装: フロントに REGISTRY(table/chart/card/form)、<code>props</code> は Zod 検証、未知 <code>component</code> は <code>ToolCallChip</code> フォールバック</li>
+<li>封筒に <code>mode</code> フィールド(<code>&quot;declarative&quot;|&quot;iframe&quot;</code>)を予約。iframe 方式(B)は実装せずデフォルト <code>declarative</code></li>
+<li>UI→エージェント往復は案2（<code>chat/stream</code> へ <code>[ui-action]</code> 整形メッセージ再投入）。新エンドポイントは作らない</li>
+<li>永続化は <code>ToolMessage.artifact</code> 経由で checkpoint へ自動保存。<code>MessageOut.ui</code>(既定None) と <code>history.py</code> の <code>coerce_ui</code> で履歴リロード時に再水和</li>
+<li><code>useChatStream.ts</code> に <code>onUIResource</code> / <code>case &quot;ui_resource&quot;</code> 追加（<code>default:break</code> による未知イベント無視の前方互換を維持）</li>
+<li>UIツールの <code>content</code> は意味のある日本語要約にする規約（<code>artifact</code> はLLM文脈に渡らないため）</li>
+</ul>
+
+<h2>将来拡張</h2>
+<p>v1 では予約・設計余地を残すだけで、後から非破壊で追加する範囲です。</p>
+<ul>
+<li><strong>(B) サンドボックスiframe方式:</strong> <code>mode:&quot;iframe&quot;</code> の任意HTML/JS を 二重iframe + sandbox属性 + CSP(HTTPヘッダ) + オリジン検証 + postMessage越しJSON-RPC で隔離描画（MCP Apps 2026-01-26 準拠）</li>
+<li>FastAPI に別オリジン相当のサンドボックス配信エンドポイント（例 <code>GET /sandbox/proxy</code>）を追加</li>
+<li>外部MCPサーバの <code>ui-scheme</code> リソース宣言を <code>mcp_servers.json</code> 経由で取り込み、<code>coerce_ui</code> で本封筒へ正規化</li>
+<li>app限定アクション（<code>visibility:app</code> 相当）の導入で、リフレッシュ/ページング/フォーム送信をエージェント文脈・マルチエージェントのトークンから隠す</li>
+<li>UIローカル状態の保持: 軽い状態は <code>ui_id</code> キーで <code>localStorage</code>、労力がかかる状態は checkpoints/LangMem へ（<code>setWidgetState</code> 相当の自前API）</li>
+<li>部分描画（体感遅延低減）: 既存 custom progress 透過機構で部分 <code>props</code> をストリームし、ローディングプレビューを先出し（ontoolinputpartial / input-streaming 相当）</li>
+<li><code>ChatRequest.ui_action</code> 構造化フィールド＋<code>streaming</code> 冒頭の <code>format_ui_action</code> 定型整形で、往復の非決定性を抑制</li>
+<li>props 肥大化対策: ui <code>props</code> に行数/バイト数上限を設け、超過時はサーバ側ページネーション or 要約</li>
+<li>executor サブグラフ経由UIの永続化（現状は responder 高速パスのみ確実に永続化）</li>
+</ul>
+
+<h2>未解決の論点</h2>
+<p>確定仕様に対して、実装着手前に決め切りたい論点を残しています。</p>
+<ul>
+<li>UIツールの <code>content</code>(要約)を「規約」で縛るだけで十分か、それとも <code>ui()</code> ヘルパーで <code>summary</code> 必須化＋lint等の機械的強制を入れるべきか</li>
+<li><code>props</code> のサイズ上限値（行数/バイト数）の具体値と、超過時の挙動（ページネーション vs 要約 vs 切り詰め）</li>
+<li>往復経路は MVP で <code>ChatRequest</code> 無改修（フロント文字列整形）で出すか、最初から <code>ui_action</code> 構造化フィールドを入れて非決定性を抑えるか</li>
+<li>chart コンポーネントの追加依存（recharts 等）の採否とバンドルサイズ影響</li>
+<li>executor 経由でUIツールが呼ばれた場合に synthesizer 要約へ縮約される挙動を MVP で許容するか、responder 経路に明示誘導するか</li>
+<li><code>ui_resource</code> の二重配信 dedupe を <code>tool_call_id</code> 基準にした際、<code>ui_id</code> 明示指定との優先順位（同一ツールが複数UIを返すケース）</li>
+<li>履歴 API の <code>props</code> 肥大時に <code>GET /api/threads/{id}/messages</code> のレスポンス上限/ページングをどう扱うか</li>
+</ul>
+
+<h2>関連ページ</h2>
+<p>本ページは既存設計書の各章と密接に接続しています。実装時は次を併読してください。</p>
+<ul>
+<li><a href="05-streaming.html">ストリーミング設計</a> — SSE 3モード(messages/updates/custom)とイベント対応、dedupe・done/error排他の母体。<code>ui_resource</code> はこの updates 分岐に追加します。</li>
+<li><a href="06-extensibility.html">拡張ガイド</a> — 「<code>app/tools</code> に置くだけ」「<code>mcp_servers.json</code> に1行」の拡張哲学。UIツールはこの自動登録(<code>isinstance BaseTool</code>)にそのまま乗ります。</li>
+<li><a href="07-api-reference.html">API リファレンス</a> — <code>POST /api/chat/stream</code>（往復経路 案2 の再利用先）と <code>GET /api/threads/{id}/messages</code>（再水和元）。<code>MessageOut.ui</code> の追加先です。</li>
+<li><a href="08-data-model.html">データモデルと永続化</a> — checkpoints(<code>AsyncPostgresSaver</code>)への永続化と会話履歴復元。<code>ToolMessage.artifact</code> が自動で乗ります。</li>
+<li><a href="09-frontend.html">フロントエンド設計</a> — <code>useChatStream</code> / <code>ChatView</code> / <code>MessageBubble</code> / <code>ToolCallChip</code>。<code>UIResource.tsx</code> と REGISTRY を追加し、<code>toUIMessages</code> で <code>ui</code> を後付け再描画します。</li>
+</ul>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

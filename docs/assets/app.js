@@ -18,6 +18,7 @@ const PAGES = [
   { slug: "08-data-model",    ix: "08", icon: "🗃️", title: "データモデルと永続化",     desc: "DB と namespace" },
   { slug: "09-frontend",      ix: "09", icon: "💻", title: "フロントエンド設計",       desc: "React の構成" },
   { slug: "10-setup",         ix: "10", icon: "⚙️", title: "セットアップと運用",       desc: "起動と運用" },
+  { slug: "11-generative-ui", ix: "11", icon: "🎨", title: "チャット内GUI（生成的UI）", desc: "UI封筒と描画" },
 ];
 
 const inGuide = location.pathname.includes("/guide/");

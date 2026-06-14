@@ -96,6 +96,69 @@ async def test_tool_events_dedupe_and_responder_parent_skip():
     assert [e.data["id"] for e in tool_results] == ["t1"]
 
 
+def _ui_tool_message(tc_id: str, *, component: str = "table") -> ToolMessage:
+    """UI 封筒 (artifact) を持つ ToolMessage を作る。"""
+    return ToolMessage(
+        content="テーブルを表示しました",
+        tool_call_id=tc_id,
+        name="render_table",
+        artifact={
+            "v": 1,
+            "kind": "ui",
+            "component": component,
+            "mode": "declarative",
+            "props": {"title": "比較表", "columns": ["a"], "rows": [["1"]]},
+        },
+    )
+
+
+async def test_ui_resource_emitted_before_tool_result():
+    ai = _ai_with_tool_call("t1")
+    ui_msg = _ui_tool_message("t1")
+    parts = [
+        (("responder:run1",), "updates", {"model": {"messages": [ai]}}),
+        (("responder:run1",), "updates", {"tools": {"messages": [ui_msg]}}),
+    ]
+    events = await _collect(FakeAgent(parts))
+    names = [e.event for e in events]
+    # 同一 id に対し tool_call → ui_resource → tool_result の順で届く
+    assert names.index("tool_call") < names.index("ui_resource")
+    assert names.index("ui_resource") < names.index("tool_result")
+    ui_events = [e for e in events if e.event == "ui_resource"]
+    assert len(ui_events) == 1
+    data = ui_events[0].data
+    assert data["id"] == "t1"
+    assert data["component"] == "table"
+    assert data["mode"] == "declarative"
+    assert data["name"] == "render_table"
+    assert data["props"]["title"] == "比較表"
+
+
+async def test_ui_resource_dedupe_on_parent_replay():
+    ai = _ai_with_tool_call("t1")
+    ui_msg = _ui_tool_message("t1")
+    parts = [
+        (("responder:run1",), "updates", {"model": {"messages": [ai]}}),
+        (("responder:run1",), "updates", {"tools": {"messages": [ui_msg]}}),
+        # responder 親レベル update は全履歴の再掲 → ui_resource も重複させない
+        ((), "updates", {"responder": {"messages": [ai, ui_msg, AIMessage(content="回答")]}}),
+    ]
+    events = await _collect(FakeAgent(parts))
+    assert len([e for e in events if e.event == "ui_resource"]) == 1
+
+
+async def test_non_ui_tool_message_emits_no_ui_resource():
+    ai = _ai_with_tool_call("t1")
+    tool_msg = ToolMessage(content="42", tool_call_id="t1", name="calc")
+    parts = [
+        (("responder:run1",), "updates", {"model": {"messages": [ai]}}),
+        (("responder:run1",), "updates", {"tools": {"messages": [tool_msg]}}),
+    ]
+    events = await _collect(FakeAgent(parts))
+    assert not [e for e in events if e.event == "ui_resource"]
+    assert [e.event for e in events if e.event == "tool_result"]
+
+
 async def test_progress_passthrough_and_legacy_compat():
     parts = [
         (

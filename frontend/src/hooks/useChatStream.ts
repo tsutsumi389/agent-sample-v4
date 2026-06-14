@@ -7,12 +7,14 @@ import type {
   TokenEvent,
   ToolCallEvent,
   ToolResultEvent,
+  UIResourceEvent,
 } from "../api/types";
 
 export interface StreamHandlers {
   onToken: (e: TokenEvent) => void;
   onToolCall: (e: ToolCallEvent) => void;
   onToolResult: (e: ToolResultEvent) => void;
+  onUIResource?: (e: UIResourceEvent) => void;
   onProgress?: (e: ProgressEvent) => void;
   onDone: (e: DoneEvent) => void;
   onError: (e: ErrorEvent) => void;
@@ -100,6 +102,9 @@ export function useChatStream() {
               break;
             case "tool_result":
               handlers.onToolResult(data as ToolResultEvent);
+              break;
+            case "ui_resource":
+              handlers.onUIResource?.(data as UIResourceEvent);
               break;
             case "progress":
               handlers.onProgress?.(data as ProgressEvent);

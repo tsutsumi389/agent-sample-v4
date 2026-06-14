@@ -1,8 +1,12 @@
+import type { UIResource } from "../api/types";
+
 export interface UIToolCall {
   id: string;
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  /** 生成的UI: このツール呼び出しが返した UI 封筒 (あれば UIResource で描画)。 */
+  ui?: UIResource;
 }
 
 interface Props {

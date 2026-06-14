@@ -45,6 +45,9 @@ class MessageOut(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    # 生成的UI: ツールが返した UI 封筒 (coerce_ui の結果)。既定 None で後方互換。
+    # threads ルータは response_model_exclude_none=True のため UI なしでは出力されない。
+    ui: dict[str, Any] | None = None
 
 
 class MessagesOut(BaseModel):
