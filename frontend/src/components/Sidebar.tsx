@@ -47,7 +47,16 @@ export function Sidebar({
           <div
             key={t.thread_id}
             className={`thread-item ${t.thread_id === activeThreadId ? "active" : ""}`}
+            role="button"
+            tabIndex={0}
+            aria-current={t.thread_id === activeThreadId ? "true" : undefined}
             onClick={() => onSelect(t.thread_id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(t.thread_id);
+              }
+            }}
           >
             <div className="thread-info">
               <div className="thread-title">{t.title}</div>

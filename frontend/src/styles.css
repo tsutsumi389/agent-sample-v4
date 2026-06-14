@@ -1,19 +1,135 @@
 :root {
-  --bg: #0f1117;
-  --bg-panel: #161922;
-  --bg-elevated: #1e2230;
-  --bg-hover: #252a3a;
-  --border: #2a2f40;
-  --text: #e2e6f0;
-  --text-dim: #8b91a7;
+  /* --- 面と境界: 紺青に寄せた One Dark 派生の冷色トーン ---
+     bg と bg-panel の明度差を広げ、3カラムの面を border 頼みでなく
+     階調そのもので分離する (panel を一段持ち上げる)。 */
+  --bg: #0c0e15;
+  --bg-panel: #161a25;
+  --bg-elevated: #1f2433;
+  --bg-hover: #272d3f;
+  /* 境界を一段持ち上げ、hover 前でも面の縁が静かに視認できるようにする */
+  --border: #333a4f;
+  --border-soft: #262c3d;
+
+  /* --- 文字 ---
+     減光階層のステップを一段広げ、隣接時の主従(meta>dim>faint)を明確化する。
+     text-meta は 11px の極小メタ専用の可読寄りトークン (panel 上で AA を確保)。
+     減光階層は text > meta > dim > faint の順を厳守する。meta を一段持ち上げ
+     (#aeb4c9→#b6bcd0)、meta と dim の明度差を約9%→約13%へ開いて主従の拍を立てる。
+     faint は 11px メタの判読限界に近かったため底を持ち上げ(#7c8298→#888fa6)、
+     dim(#939ab2)の直下に置いて順序を保ちつつ暗背景上の可読性を救う。 */
+  --text: #e4e8f2;
+  --text-dim: #939ab2;
+  --text-meta: #b6bcd0;
+  --text-faint: #888fa6;
+  /* アクセント面の上に乗る文字色 (送信/危険ボタン等)。#fff リテラルを単一出典化。 */
+  --text-on-accent: #ffffff;
+
+  /* --- アクセント: 青を基軸に温度を統一 --- */
   --accent: #5b8def;
   --accent-hover: #6f9cf5;
-  --danger: #e06c75;
-  --user-bubble: #2d3a5c;
+  --accent-soft: rgba(91, 141, 239, 0.14);
+  --accent-glow: rgba(91, 141, 239, 0.28);
+
+  /* --- 状態色: running(琥珀)と done(緑)で明度・面コントラストに一段差をつけ、
+     ラベルや形を見ずとも静止画で識別できるようにする。
+     running は彩度を一段抑えた燻し琥珀で『進行中の控えめな点滅』に、
+     done は明度を一段上げた澄んだ緑で『完了の落ち着いた確かさ』に振り分ける。
+     面(tint)は done を厚く・running を薄く、文字明度も done を一段上げる。 */
+  --running: #d9a857; /* 思考中: 彩度を抑えた燻し琥珀 (やや沈む) */
+  --running-tint: rgba(217, 168, 87, 0.11);
+  --running-border: rgba(217, 168, 87, 0.34);
+  --done: #84dcaf; /* 完了: 明度を上げた澄んだ緑 (前に出る) */
+  /* done と running の面厚を揃え(0.2→0.13 / 0.11)、両状態を並置したとき
+     done の面が前に出すぎてリストの拍を乱さないようにする。前後は面でなく
+     文字明度(done を一段上げた澄んだ緑)で静かに語らせる。 */
+  --done-tint: rgba(132, 220, 175, 0.13);
+  --done-border: rgba(132, 220, 175, 0.5);
+  --danger: #e0727b;
+  --danger-hover: #e98792;
+  --danger-tint: rgba(224, 114, 123, 0.12);
+  --danger-border: rgba(224, 114, 123, 0.35);
+
+  /* ユーザー発話: アクセント青と色相を競わせず、無彩色寄りの石板色へ。
+     話者差は「色相」でなく「明度と縁取り」で語り、青の面はアクセント系へ一意化する。
+     assistant の bg-elevated(#1f2433)に対し面を一段持ち上げ(#323852)、縁取りも
+     明るくして、左右配置を見なくても面だけで話者を判別できる自立性を与える。 */
+  --user-bubble: #323852;
+  --user-bubble-border: #454d6b;
+
+  /* --- 半径の階層 (端数も全てトークン化) --- */
+  --radius-dot: 2px;
+  --radius-sm: 6px;
   --radius: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* --- 装飾シンボルの寸法トークン ---
+     輪/結び目モチーフやトラック高など、これまで生pxで散っていた装飾系の
+     寸法を体系へ昇華する。dot=進行ドット, sm=見出し脇シンボル, md=タイトル脇,
+     track=棒グラフ軌道高。これでトークン体系の自立性を綻びなく閉じる。 */
+  --size-dot: 14px;
+  --size-symbol-sm: 22px;
+  --size-symbol-md: 24px;
+  --size-track: 14px;
+
+  /* アクセントのグラデーション: 棒グラフ等の塗りを単一出典化する。 */
+  --gradient-accent: linear-gradient(90deg, var(--accent), var(--accent-hover));
+
+  /* --- 奥行き --- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 18px -6px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 48px -12px rgba(0, 0, 0, 0.6);
+
+  /* --- 遷移 --- */
+  --transition: 0.15s ease;
+  --transition-slow: 0.25s ease;
+
+  /* --- アニメーション周期 (拍を整える) ---
+     脈動系を単一の基本拍 1.2s に揃え、複数同時表示でも律が濁らないようにする。
+     呼吸(空状態)はその 4 倍(4.8s)の倍音にして静謐を保ちつつ拍へ同期させる。 */
+  --beat: 1.2s;
+  --beat-breathe: 4.8s;
+
+  /* --- タイポスケール (1.125 基調) --- */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
+  /* --- 余白スケール (8px グリッド) ---
+     段階トークンで全 padding/gap を骨格化し、端数の散りを排する。 */
+  --space-0: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-pane: var(--space-4);
+  --space-center: var(--space-6);
+
+  /* 可読行長: 標準幅でも会話列が間延びしないよう clamp で常用幅から締める。
+     下限 44rem(常用ノートPC幅でも効く) → 上限 56rem(広幅で開放)。 */
+  --measure: clamp(44rem, 86vw, 56rem);
+
+  /* 痕跡モチーフの細帯幅: ツールチップ/通知/生成UI の左辺アクセント帯を単一出典化 */
+  --accent-bar-w: 2px;
+
+  /* キャレットの寸法 (グリッドに乗せた専用トークン) */
+  --caret-w: 2px;
+  --caret-h: 1.05em;
+
+  /* 混植スタック: Inter を前段に重ね、英数字・コード・スコアの字形を締める。
+     日本語は Noto Sans JP が受け持つ。 */
   font-family:
-    "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", system-ui,
-    -apple-system, sans-serif;
+    "Inter", "Noto Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    monospace;
 }
 
 * {
@@ -30,18 +146,54 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.6;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Inter のコンテクスチュアル代替を有効化し、欧文・数値の字形を引き締める */
+  font-feature-settings: "cv05", "cv11", "ss01";
 }
 
 button {
   font-family: inherit;
 }
 
+/* 美観を保ったキーボードフォーカス: アクセントのリングを全クリック要素へ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .app {
   display: grid;
-  grid-template-columns: 260px 1fr 320px;
+  /* 中央会話列に最低幅を保証し、両脇の固定列に押し潰されて窒息するのを防ぐ。
+     minmax(0,...) で 1fr 列の min-content による溢れも抑える。 */
+  grid-template-columns: 260px minmax(0, 1fr) 320px;
   height: 100%;
+}
+
+/* --- 構図の逃げ道: 中幅では記憶パネルを畳み、中央会話へ幅を返す ---
+     1180px 以下で右パネル(320px)を退避し、会話列が窒息しないよう逃がす。 */
+@media (max-width: 1180px) {
+  .app {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+  .memory-panel {
+    display: none;
+  }
+}
+
+/* 920px 以下では左サイドバーも畳み、会話を全幅へ。狭幅で3カラムが破綻する
+   代わりに、主役(会話)へ静かに一本化する。 */
+@media (max-width: 920px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    display: none;
+  }
 }
 
 /* ---------- 共通 ---------- */
@@ -50,15 +202,25 @@ button {
   background: var(--bg-elevated);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 14px;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-md);
+  font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  transition:
+    background var(--transition),
+    border-color var(--transition),
+    color var(--transition),
+    box-shadow var(--transition),
+    transform var(--transition);
 }
 
 .btn:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .btn:disabled {
@@ -66,23 +228,43 @@ button {
   cursor: default;
 }
 
+/* 入力欄の基底クラス: bg/角丸/border/フォーカスを単一の語彙へ統一 */
+.input {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .sidebar-note,
 .chat-note {
   color: var(--text-dim);
-  font-size: 13px;
-  padding: 12px;
+  font-size: var(--fs-md);
+  padding: var(--space-3);
   text-align: center;
 }
 
 .panel-error,
 .chat-error {
   color: var(--danger);
-  font-size: 13px;
-  padding: 8px 12px;
-  background: rgba(224, 108, 117, 0.1);
-  border: 1px solid rgba(224, 108, 117, 0.35);
-  border-radius: 8px;
-  margin: 8px 0;
+  font-size: var(--fs-md);
+  padding: var(--space-2) var(--space-3);
+  background: var(--danger-tint);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  margin: var(--space-2) 0;
   word-break: break-word;
 }
 
@@ -94,54 +276,95 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 中央キャンバスへ向けて柔らかな陰影を落とし、面を border 頼みでなく立てる */
+  box-shadow: 1px 0 0 var(--border-soft), 6px 0 16px -10px rgba(0, 0, 0, 0.5);
 }
 
 .sidebar-header {
-  padding: 16px 12px 12px;
+  padding: var(--space-4) var(--space-4) var(--space-3);
   border-bottom: 1px solid var(--border);
 }
 
 .app-title {
-  font-size: 16px;
-  margin: 0 0 12px;
-  letter-spacing: 0.03em;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  margin: 0 0 var(--space-4);
+  letter-spacing: -0.01em;
 }
 
+/* エージェントのシンボル: 同心の輪 = 思考と記憶のモチーフ。
+   径を 24px へ広げ、二重の輪を明瞭にして視覚的署名として立てる。 */
+.app-title::before {
+  content: "";
+  width: var(--size-symbol-md);
+  height: var(--size-symbol-md);
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background:
+    radial-gradient(
+      circle at 50% 50%,
+      var(--accent) 0 4px,
+      transparent 4px 6px,
+      var(--accent-glow) 6px 9px,
+      transparent 9px
+    );
+  box-shadow: 0 0 12px -1px var(--accent-glow);
+}
+
+/* 副次CTA: accent の塗りを一段抑え、輪郭で主張する。
+   主行動 (送信) を画面右下の焦点として突出させるための階層づけ。 */
 .btn.new-thread {
   width: 100%;
-  background: var(--accent);
+  background: var(--accent-soft);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-hover);
   font-weight: 600;
 }
 
-.btn.new-thread:hover {
-  background: var(--accent-hover);
+.btn.new-thread:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
 }
 
 .thread-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  /* 両サイドパネルのリスト内パディングを space-3 で対称化し、左右の呼吸を揃える。
+     (旧 space-2 は memory-list の space-3 とズレ、対称であるべき両脇の拍が乱れた) */
+  padding: var(--space-3);
 }
 
 .thread-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-radius: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  margin-bottom: 2px;
+  margin-bottom: var(--space-0);
+  border: 1px solid transparent;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
 }
 
 .thread-item:hover {
   background: var(--bg-hover);
 }
 
+.thread-item:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
 .thread-item.active {
   background: var(--bg-elevated);
-  outline: 1px solid var(--accent);
+  border-color: var(--accent);
 }
 
 .thread-info {
@@ -153,24 +376,39 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 13px;
+  font-size: var(--fs-md);
+  font-weight: 500;
 }
 
+.thread-item.active .thread-title {
+  color: var(--accent-hover);
+}
+
+/* 日付は数値主体。tabular-nums と併せ僅かな正トラッキングで桁を読みやすくする
+   (字間調整は欧文・数値主体の要素に限定する、という本CSSの一貫方針に従う)。 */
 .thread-date {
-  color: var(--text-dim);
-  font-size: 11px;
+  color: var(--text-meta);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  margin-top: var(--space-0);
 }
 
 .btn.thread-delete {
-  padding: 2px 8px;
-  font-size: 11px;
+  padding: var(--space-0) var(--space-2);
+  font-size: var(--fs-xs);
   color: var(--text-dim);
   flex-shrink: 0;
-  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity var(--transition),
+    color var(--transition),
+    border-color var(--transition);
 }
 
-.thread-item:hover .btn.thread-delete {
-  visibility: visible;
+.thread-item:hover .btn.thread-delete,
+.thread-item:focus-within .btn.thread-delete {
+  opacity: 1;
 }
 
 .btn.thread-delete:hover {
@@ -189,50 +427,160 @@ button {
 .message-list {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 32px;
+  padding: var(--space-5) var(--space-6);
+}
+
+/* 広幅モニタで本文が間延びしないよう、中央コンテンツに可読幅を与え中央寄せ。
+   構図の主役 (会話) を最後まで締める。 */
+.message-list > * {
+  max-width: var(--measure);
+  margin-inline: auto;
+}
+.message-list > .message-row {
+  width: 100%;
 }
 
 .chat-empty {
+  position: relative;
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: var(--space-4);
   color: var(--text-dim);
+  text-align: center;
+}
+
+.chat-empty h2 {
+  margin: var(--space-2) 0 0;
+  font-size: var(--fs-2xl);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+/* 空状態の同心の輪。世界観の核となる「輪」のモチーフだが、抑制された
+   ダークトーンの『静けさ』を優先し、径を縮め脈動は opacity 主体の微かな
+   呼吸へ弱める。佇まいの静謐さを保ったまま署名として静かに灯す。 */
+.chat-empty::before {
+  content: "";
+  width: 88px;
+  height: 88px;
+  border-radius: var(--radius-pill);
+  background:
+    radial-gradient(
+      circle at 50% 50%,
+      var(--accent) 0 8px,
+      transparent 8px 17px,
+      var(--accent-glow) 17px 21px,
+      transparent 21px 31px,
+      var(--accent-soft) 31px 34px,
+      transparent 34px
+    );
+  box-shadow: 0 0 40px -10px var(--accent-glow);
+  animation: breathe var(--beat-breathe) ease-in-out infinite;
+}
+
+/* 輪を取り巻く外周のかすかな後光。径を縮め、痕跡が静かに空間へ滲む気配に留める。 */
+.chat-empty::after {
+  content: "";
+  position: absolute;
+  width: 176px;
+  height: 176px;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(
+    circle at 50% 50%,
+    var(--accent-soft) 0%,
+    transparent 64%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* 空状態専用の微かな呼吸: scale 振幅をほぼ無くし opacity の明滅を主体にする。
+   静止画に近い佇まいを保ちつつ、わずかな生気だけを宿す。 */
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(0.985);
+    opacity: 0.72;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.chat-empty p {
+  margin: 0;
+  font-size: var(--fs-base);
+  max-width: 38ch;
+  line-height: 1.7;
 }
 
 .message-row {
   display: flex;
-  margin-bottom: 16px;
+  /* 話者交代の境界。同話者連続では一段詰めて会話をグルーピングする。 */
+  margin-bottom: var(--space-5);
 }
 
 .message-row.user {
   justify-content: flex-end;
 }
 
+/* 同話者の連続発話は間隔を詰め、ロールも省略して塊として読ませる。
+   垂直リズムに強弱の波を作り、視線誘導を整える。 */
+.message-row.continued {
+  margin-top: calc(var(--space-4) * -1 + var(--space-1));
+}
+
 .message-bubble {
   max-width: 76%;
-  border-radius: var(--radius);
-  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-sm);
 }
 
 .message-bubble.user {
   background: var(--user-bubble);
+  border: 1px solid var(--user-bubble-border);
+  border-bottom-right-radius: var(--radius-sm);
 }
 
 .message-bubble.assistant {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
+  border-bottom-left-radius: var(--radius-sm);
 }
 
+/* ロールラベル: 日本語『あなた/アシスタント』。正トラッキングは字面が緩むため
+   除去し(0)、小さく静かな見出しに留める。字間調整は欧文・数値主体に限定する方針。 */
 .message-role {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-bottom: 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-meta);
+  margin-bottom: var(--space-1);
+}
+
+.message-row.user .message-role {
+  text-align: right;
 }
 
 .message-content {
   white-space: pre-wrap;
   word-break: break-word;
+  /* 和文主体の本文は 1.6 だと長文でやや詰まるため 1.75 へ引き上げ、行間に
+     呼吸を与える。締めたい局面(見出し1.3 / コード1.5)や欧文混じりの密な
+     局面(markdown 内)は別途分岐させ、和文長文だけに広い行送りを効かせる。 */
+  line-height: 1.75;
+}
+
+/* markdown(欧文・コード・リスト混じり)は密度が高く 1.75 では緩むため、
+   本文の標準 1.6 に戻して欧文混じり局面と和文長文の呼吸を分岐させる。 */
+.message-content.markdown {
+  line-height: 1.6;
 }
 
 .message-content.thinking {
@@ -253,36 +601,39 @@ button {
 }
 
 .message-content.markdown p {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .message-content.markdown ul,
 .message-content.markdown ol {
-  margin: 0 0 8px;
-  padding-left: 22px;
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-5);
 }
 
 .message-content.markdown li {
-  margin: 2px 0;
+  margin: var(--space-0) 0;
 }
 
 .message-content.markdown h1,
 .message-content.markdown h2,
 .message-content.markdown h3 {
-  margin: 14px 0 8px;
+  margin: var(--space-4) 0 var(--space-2);
   line-height: 1.3;
+  font-weight: 700;
+  /* 和文見出しは正トラッキングで字面が緩むため、見出し語彙を僅かな負へ統一 */
+  letter-spacing: -0.01em;
 }
 
 .message-content.markdown h1 {
-  font-size: 18px;
+  font-size: var(--fs-xl);
 }
 
 .message-content.markdown h2 {
-  font-size: 16px;
+  font-size: var(--fs-lg);
 }
 
 .message-content.markdown h3 {
-  font-size: 14px;
+  font-size: var(--fs-base);
 }
 
 .message-content.markdown a {
@@ -297,18 +648,18 @@ button {
 .message-content.markdown code {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 5px;
-  font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
 }
 
 .message-content.markdown pre {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
-  margin: 0 0 8px;
+  padding: var(--space-3);
+  margin: 0 0 var(--space-2);
   overflow-x: auto;
 }
 
@@ -316,55 +667,103 @@ button {
   background: none;
   border: none;
   padding: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
 
 .message-content.markdown blockquote {
-  margin: 0 0 8px;
-  padding-left: 12px;
-  border-left: 3px solid var(--border);
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--accent-glow);
   color: var(--text-dim);
 }
 
-.message-content.markdown table {
+/* テーブルは markdown と生成的UI(.ui-table)で同一の罫線・余白語彙を共有する。
+   二重定義を避け、デザインシステムの自立性を高める。 */
+.message-content.markdown table,
+.ui-table table {
   border-collapse: collapse;
-  margin: 0 0 8px;
-  font-size: 13px;
+  margin: 0 0 var(--space-2);
+  width: 100%;
+  font-size: var(--fs-md);
 }
 
 .message-content.markdown th,
-.message-content.markdown td {
+.message-content.markdown td,
+.ui-table th,
+.ui-table td {
   border: 1px solid var(--border);
-  padding: 4px 10px;
+  padding: var(--space-1) var(--space-3);
   text-align: left;
 }
 
-.message-content.markdown th {
-  background: var(--bg-elevated);
+.message-content.markdown th,
+.ui-table th {
+  background: var(--bg-hover);
+  font-weight: 600;
+  color: var(--text);
 }
 
 .cursor {
   display: inline-block;
-  width: 8px;
-  height: 14px;
+  width: var(--caret-w);
+  height: var(--caret-h);
   background: var(--accent);
-  margin-left: 2px;
+  border-radius: var(--radius-dot);
+  margin-left: var(--space-1);
   vertical-align: text-bottom;
-  animation: blink 1s steps(1) infinite;
+  box-shadow: 0 0 6px var(--accent-glow);
+  animation: blink var(--beat) ease-in-out infinite;
 }
 
 @keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
   50% {
-    opacity: 0;
+    opacity: 0.2;
   }
 }
 
+/* 進行状況: 思考のトーンを示す脈動する同心の輪。
+   title/empty と同じ「輪」のモチーフを思考中の局面にも貫通させる。 */
 .progress-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-style: italic;
-  padding: 4px 0;
+  padding: var(--space-1) 0;
+}
+
+.progress-line::before {
+  content: "";
+  width: var(--size-dot);
+  height: var(--size-dot);
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(
+    circle at 50% 50%,
+    var(--running) 0 2.5px,
+    transparent 2.5px 4.5px,
+    var(--running-tint) 4.5px 6px,
+    transparent 6px
+  );
+  animation: pulse var(--beat) ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 /* ---------- ツールコールチップ ---------- */
@@ -372,127 +771,215 @@ button {
 .tool-chips {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
 }
 
+/* ツールコールにも固有の視覚言語を: 左辺に accent の細帯を通し、
+   記憶カードと同じ「痕跡」の語彙でツール実行を面に刻む。 */
 .tool-chip {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
+  border-left: var(--accent-bar-w) solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+
+/* 開状態は accent 寄りの輪郭と陰影で「展開された」遷移を明示する */
+.tool-chip[open] {
+  border-color: var(--border);
+  border-left-color: var(--accent);
+  box-shadow: var(--shadow-sm);
 }
 
 .tool-chip summary {
   cursor: pointer;
-  padding: 6px 10px;
+  padding: var(--space-1) var(--space-3);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   list-style: none;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+}
+
+/* WebKit 既定マーカーを明示除去。list-style:none と併せ二重マーカーを防ぎ、
+   自作の ▸ のみを残してクロスブラウザの仕上げを締める。 */
+.tool-chip summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-chip summary:hover {
+  background: var(--bg-hover);
 }
 
 .tool-chip summary::before {
   content: "▸";
   color: var(--text-dim);
+  transition: transform var(--transition);
 }
 
 .tool-chip[open] summary::before {
-  content: "▾";
+  transform: rotate(90deg);
+  color: var(--accent);
 }
 
 .tool-chip-name {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   color: var(--accent);
 }
 
 .tool-chip-status {
-  font-size: 11px;
-  border-radius: 999px;
-  padding: 1px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  padding: var(--space-0) var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* 状態ドットを拡大し、形でも判別できるようにして色覚非依存性を補強する */
+.tool-chip-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
 }
 
 .tool-chip-status.running {
-  background: rgba(229, 192, 123, 0.15);
-  color: #e5c07b;
+  background: var(--running-tint);
+  border-color: var(--running-border);
+  /* 11px の極小文字を明度の高い色で起こし、面コントラストを補強する */
+  color: var(--running);
+}
+
+/* 実行中: 中空の輪(痕跡モチーフ)を脈動させる。done の充実ドットと形が異なり、
+   静止時も「進行中=輪郭だけの未完の痕跡」として一目で判別できる。 */
+.tool-chip-status.running::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+  animation: pulse var(--beat) ease-in-out infinite;
 }
 
 .tool-chip-status.done {
-  background: rgba(152, 195, 121, 0.15);
-  color: #98c379;
+  background: var(--done-tint);
+  border-color: var(--done-border);
+  /* done は明度を上げた緑で前に出し、running(沈む琥珀)と静止画で識別させる */
+  color: var(--done);
+}
+
+/* 完了: 塗りつぶされた角丸の点(閉じた痕跡)。中空の running と形で対比する。 */
+.tool-chip-status.done::before {
+  border-radius: var(--radius-dot);
 }
 
 .tool-chip-body {
   border-top: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
 }
 
 .tool-chip-section + .tool-chip-section {
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 .tool-chip-label {
-  color: var(--text-dim);
-  font-size: 11px;
-  margin-bottom: 2px;
+  color: var(--text-meta);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  /* 和文ラベル(引数/結果)。字間調整は欧文・数値主体に限定する方針につき 0 */
+  letter-spacing: 0;
+  margin-bottom: var(--space-0);
 }
 
 .tool-chip pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-all;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
   max-height: 200px;
   overflow-y: auto;
 }
 
 /* ---------- コンポーザー ---------- */
 
+/* コンポーザーの帯は全幅で border-top を通し、面の連続性を保つ。
+   内側の入力行のみ中央会話列と同じ可読幅へ揃える。 */
 .composer {
-  display: flex;
-  gap: 10px;
-  align-items: flex-end;
-  padding: 16px 32px 20px;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
+  padding: var(--space-4) var(--space-6) var(--space-5);
 }
 
+.composer-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-end;
+  width: 100%;
+  max-width: var(--measure);
+  margin-inline: auto;
+}
+
+/* .input 基底に対するチャット欄固有の上書き */
 .composer-input {
   flex: 1;
-  background: var(--bg-elevated);
-  color: var(--text);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  font-family: inherit;
-  font-size: 14px;
+  padding: var(--space-3);
+  font-size: var(--fs-base);
   line-height: 1.5;
   resize: none;
 }
 
-.composer-input:focus {
-  outline: 1px solid var(--accent);
-}
-
+/* 画面の主行動。new-thread より一段強い塗りと glow で右下の焦点に据える。
+   transition は基底 .btn に集約済みのため派生では再宣言せず差分のみ持つ。 */
 .btn.send {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   font-weight: 600;
-  padding: 10px 20px;
+  padding: var(--space-3) var(--space-5);
+  box-shadow: 0 6px 18px -6px var(--accent-glow), 0 0 0 1px var(--accent-glow);
 }
 
 .btn.send:hover:not(:disabled) {
   background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: 0 8px 22px -6px var(--accent-glow), 0 0 0 1px var(--accent-glow);
 }
 
+/* CTA の押下表現: 沈み込みと glow の縮退で送信の触覚的フィードバックを返す。
+   基底 .btn:active(translateY 1px) は box-shadow 上書きで弱まるため明示補強。 */
+.btn.send:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 3px 10px -6px var(--accent-glow), 0 0 0 1px var(--accent-glow);
+}
+
+/* danger 系 hover も send と同じ background+box-shadow の作法へ寄せ、
+   filter brightness の独自路線を排して hover 語彙を一本化する。 */
 .btn.stop {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--text-on-accent);
   font-weight: 600;
-  padding: 10px 20px;
+  padding: var(--space-3) var(--space-5);
+  box-shadow: 0 6px 18px -6px var(--danger-border), 0 0 0 1px var(--danger-border);
+}
+
+.btn.stop:hover:not(:disabled) {
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
+  box-shadow: 0 8px 22px -6px var(--danger-border), 0 0 0 1px var(--danger-border);
+}
+
+.btn.stop:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 3px 10px -6px var(--danger-border), 0 0 0 1px var(--danger-border);
 }
 
 /* ---------- メモリパネル ---------- */
@@ -503,82 +990,209 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 中央キャンバスへ向けて陰影を落とし、面を立てる (サイドバーと対称) */
+  box-shadow: -1px 0 0 var(--border-soft), -6px 0 16px -10px rgba(0, 0, 0, 0.5);
 }
 
 .memory-header {
-  padding: 16px 12px 12px;
+  padding: var(--space-4) var(--space-4) var(--space-3);
   border-bottom: 1px solid var(--border);
 }
 
 .memory-header h2 {
-  font-size: 14px;
-  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  /* 和文見出しの語彙を app-title と揃えて僅かな負トラッキングへ統一 */
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-1);
 }
 
+/* 記憶のモチーフ: 結び目状のシンボル。径を広げ二重の輪郭で「結ばれた痕跡」を明瞭化。 */
+.memory-header h2::before {
+  content: "";
+  width: var(--size-symbol-sm);
+  height: var(--size-symbol-sm);
+  flex-shrink: 0;
+  border-radius: var(--radius-sm) var(--radius) var(--radius-sm) var(--radius);
+  border: 1.5px solid var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 3px var(--bg-panel), 0 0 10px -2px var(--accent-glow);
+}
+
+/* 補足注記: 長文で主役(記憶リスト)への視線導入を渋滞させていたため、
+   常時は1行に省略表示し、hover/focus で全文を開く折りたたみへ。
+   リストへ呼吸を作り、上部の密集を解く。details/summary で実装。 */
 .memory-note {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  margin: 0 0 var(--space-3);
+}
+
+.memory-note > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  color: var(--text-faint);
+  transition: color var(--transition);
+}
+
+.memory-note > summary::-webkit-details-marker {
+  display: none;
+}
+
+.memory-note > summary:hover {
   color: var(--text-dim);
-  font-size: 11px;
-  margin: 0 0 10px;
+}
+
+/* 折りたたみ時は要約を1行省略。三角マーカーは自作の小さな輪/弧で痕跡語彙へ寄せる */
+.memory-note > summary .memory-note-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.memory-note > summary::after {
+  content: "詳細";
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.memory-note[open] > summary::after {
+  content: "閉じる";
+}
+
+.memory-note-body {
+  margin-top: var(--space-1);
+  line-height: 1.6;
 }
 
 .memory-search {
   display: flex;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
 .memory-search input {
   flex: 1;
   min-width: 0;
-  background: var(--bg-elevated);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-family: inherit;
-  font-size: 13px;
-}
-
-.memory-search input:focus {
-  outline: 1px solid var(--accent);
 }
 
 .memory-list {
   flex: 1;
   overflow-y: auto;
-  padding: 10px;
+  padding: var(--space-3);
 }
 
 .memory-item {
+  position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  margin-bottom: var(--space-2);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+
+/* 記憶カードを左の細い帯で「保存された痕跡」として演出。
+   hover で帯が accent へ点灯し、touch された記憶として呼応する。 */
+.memory-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  width: var(--accent-bar-w);
+  border-radius: var(--radius-pill);
+  background: var(--accent-glow);
+  transition: background var(--transition);
+}
+
+/* 痕跡の起点に小さな同心の輪を結ぶ。空状態の輪モチーフを記憶カードへ波及させ、
+   一つ一つの記憶を「結ばれた痕跡」として静かに署名する。hover で輪が灯る。 */
+.memory-item::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--accent-bar-w) / 2);
+  top: var(--space-3);
+  width: 7px;
+  height: 7px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: radial-gradient(
+    circle at 50% 50%,
+    var(--bg-elevated) 0 1.5px,
+    var(--accent-glow) 1.5px 2.5px,
+    transparent 2.5px
+  );
+  transition: background var(--transition), box-shadow var(--transition);
+}
+
+.memory-item:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.memory-item:hover::before {
+  background: var(--accent);
+}
+
+.memory-item:hover::after {
+  background: radial-gradient(
+    circle at 50% 50%,
+    var(--bg-elevated) 0 1.5px,
+    var(--accent) 1.5px 2.5px,
+    transparent 2.5px
+  );
+  box-shadow: 0 0 6px -1px var(--accent-glow);
 }
 
 .memory-content {
-  font-size: 13px;
+  font-size: var(--fs-md);
+  /* 本文系の行間を 1.6 に揃え、message-content と垂直リズムを共有する */
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-1);
 }
 
+/* 日付・score(数値主体)の行。tabular-nums と僅かな正トラッキングは数値桁の
+   可読性向上が目的で、欧文・数値主体限定という字間方針に合致する。 */
 .memory-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text-dim);
-  font-size: 11px;
+  gap: var(--space-2);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
+/* score の青を外し、記憶パネルの青は左の「痕跡」帯ひとつに絞る。
+   送信ボタンを頂点とする青の階層を澄ませ、score は無彩色の小ピルで静かに添える。 */
 .memory-score {
-  color: var(--accent);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-hover);
+  border-radius: var(--radius-pill);
+  padding: var(--space-0) var(--space-2);
 }
 
 .btn.memory-delete {
   margin-left: auto;
-  padding: 1px 8px;
-  font-size: 11px;
+  padding: var(--space-0) var(--space-2);
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
 
@@ -589,8 +1203,8 @@ button {
 
 .btn.memory-forget-all {
   width: 100%;
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: var(--space-2);
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
@@ -599,86 +1213,127 @@ button {
   border-color: var(--danger);
 }
 
+/* 通知も青の塗り面を避け、左の細帯のみ accent を灯す「痕跡」語彙へ統一。
+   パネル内の青は左帯 (記憶カード/通知) に一意化し、視線の階層を澄ませる。 */
 .memory-notice {
-  margin: 10px 10px 0;
-  padding: 8px 10px;
-  font-size: 12px;
+  margin: var(--space-3) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
   color: var(--text);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-left: var(--accent-bar-w) solid var(--accent);
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+
+.memory-notice:hover {
+  background: var(--bg-hover);
 }
 
 /* --- 一括忘却の確認モーダル --- */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  padding: 16px;
+  padding: var(--space-4);
+  animation: overlay-in var(--transition);
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .modal {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   width: min(440px, 100%);
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  padding: var(--space-5);
+  animation: modal-in var(--transition-slow);
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
 }
 
 .modal-title {
-  margin: 0 0 8px;
-  font-size: 15px;
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  /* 和文見出しの語彙統一: 正の字間を排し僅かな負へ */
+  letter-spacing: -0.01em;
 }
 
 .modal-note {
-  margin: 0 0 12px;
-  font-size: 12px;
+  margin: 0 0 var(--space-3);
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
 .modal-list {
   flex: 1;
   overflow-y: auto;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
 }
 
 .modal-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-1);
   cursor: pointer;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+
+.modal-item:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
 }
 
 .modal-item input {
-  margin-top: 2px;
+  margin-top: var(--space-0);
 }
 
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .btn.modal-danger {
-  color: #fff;
+  color: var(--text-on-accent);
   background: var(--danger);
   border-color: var(--danger);
 }
 
+/* stop と同じ danger hover 語彙へ寄せ、opacity 任せの作法を排す */
 .btn.modal-danger:hover:not(:disabled) {
-  opacity: 0.9;
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
 }
 
 /* ============================================================
@@ -687,99 +1342,87 @@ button {
 .ui-resources {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 8px 0;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
 }
 
 .ui-resource {
   border: 1px solid var(--border);
+  border-left: var(--accent-bar-w) solid var(--accent);
   border-radius: var(--radius);
   background: var(--bg-elevated);
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-sm);
 }
 
 .ui-resource .ui-title {
   font-weight: 600;
-  margin-bottom: 8px;
+  font-size: var(--fs-base);
+  margin-bottom: var(--space-2);
   color: var(--text);
 }
 
-/* table */
+/* table — 罫線・余白は .message-content.markdown table と共有 (上部で統合定義) */
 .ui-table .table-wrap {
   overflow-x: auto;
-}
-.ui-table table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 0.9em;
-}
-.ui-table th,
-.ui-table td {
-  border: 1px solid var(--border);
-  padding: 6px 10px;
-  text-align: left;
-}
-.ui-table th {
-  background: var(--bg-hover);
-  color: var(--text);
 }
 
 /* chart (棒グラフ) */
 .ui-chart-bars {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1);
 }
 .ui-chart-row {
   display: grid;
   grid-template-columns: minmax(64px, 28%) 1fr auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .ui-chart-label {
   color: var(--text-dim);
-  font-size: 0.85em;
+  font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ui-chart-track {
   background: var(--bg-hover);
-  border-radius: 4px;
-  height: 14px;
+  border-radius: var(--radius-pill);
+  height: var(--size-track);
   overflow: hidden;
 }
 .ui-chart-fill {
   display: block;
   height: 100%;
-  background: var(--accent);
-  border-radius: 4px;
-  transition: width 0.3s ease;
+  background: var(--gradient-accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--transition-slow);
 }
 .ui-chart-value {
   font-variant-numeric: tabular-nums;
-  font-size: 0.85em;
+  font-size: var(--fs-sm);
   color: var(--text);
 }
 
 /* card */
 .ui-card-title {
-  font-weight: 700;
-  font-size: 1.05em;
-  margin-bottom: 4px;
+  font-weight: 600;
+  font-size: var(--fs-lg);
+  margin-bottom: var(--space-1);
 }
 .ui-card-body {
-  margin: 4px 0 8px;
+  margin: var(--space-1) 0 var(--space-2);
   color: var(--text-dim);
 }
 .ui-card-fields {
   margin: 0;
   display: grid;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .ui-card-field {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .ui-card-field dt {
   color: var(--text-dim);
@@ -791,51 +1434,65 @@ button {
   color: var(--text);
 }
 
-/* form */
+/* form — 入力欄は .input、送信は .btn.send を継承し、固有差分のみここで上書きする。
+   送信ボタンと同じ作法へ寄せ、デザインシステムの自立性を保つ。 */
 .ui-form {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .ui-form-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 0.9em;
+  gap: var(--space-1);
+  font-size: var(--fs-md);
   color: var(--text-dim);
 }
-.ui-form-field input,
-.ui-form-field textarea {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  color: var(--text);
-  font: inherit;
+.ui-form-control {
+  width: 100%;
+  font-size: var(--fs-md);
 }
-.ui-form-field textarea {
+textarea.ui-form-control {
   min-height: 72px;
   resize: vertical;
 }
-.ui-form button {
+.ui-form-submit {
   align-self: flex-start;
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 16px;
-  font: inherit;
-  cursor: pointer;
-}
-.ui-form button:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-.ui-form button:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 
 .ui-fallback {
   color: var(--danger);
-  font-size: 0.85em;
+  font-size: var(--fs-sm);
+}
+
+/* ============================================================
+   仕上げ: スクロールバー / モーション配慮
+   ============================================================ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
