@@ -37,7 +37,18 @@
 └─────────────────────────┘        └──────────────────────────┘
 ```
 
-詳細は [docs/architecture.md](docs/architecture.md) を参照してください。
+詳細は **設計書サイト** [docs/index.html](docs/index.html) を参照してください（ブラウザで開くと、図解つきの設計書を読めます）。主要ページ:
+
+- [はじめに（全体像と用語）](docs/guide/01-overview.html)
+- [システムアーキテクチャ](docs/guide/02-architecture.html)
+- [マルチエージェント設計](docs/guide/03-multi-agent.html)
+- [記憶アーキテクチャ](docs/guide/04-memory.html)
+- [ストリーミング設計](docs/guide/05-streaming.html)
+- [拡張ガイド（ツール / MCP）](docs/guide/06-extensibility.html)
+- [API リファレンス](docs/guide/07-api-reference.html)
+- [データモデルと永続化](docs/guide/08-data-model.html)
+- [フロントエンド設計](docs/guide/09-frontend.html)
+- [セットアップと運用](docs/guide/10-setup.html)
 
 ## 前提
 
@@ -146,7 +157,7 @@ def your_tool(query: str) -> str:
 | GET | `/api/tools` | 登録済みツール一覧 (native / langmem / mcp) |
 
 - `POST /api/chat/stream` の `thread_id` は **事前に `POST /api/threads` で作成済み**である必要があります。未知の `thread_id` は SSE 開始前に HTTP 404 `{"detail": "thread not found"}` を返します。
-- フィールド名・イベント形式の詳細は [docs/api-contract.md](docs/api-contract.md) を参照してください。
+- フィールド名・イベント形式の詳細は [API リファレンス](docs/guide/07-api-reference.html) を参照してください。
 
 ## 設計上の決定事項
 

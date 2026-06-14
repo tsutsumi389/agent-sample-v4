@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>拡張ガイド（ツール / MCP） — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>拡張ガイド（ツール / MCP）</span></nav>
+<h1>拡張ガイド（ツール / MCP）</h1>
+<p class="lead">エージェントの「できること」を増やすとき、頭脳の制御コード（<code>graph.py</code> など）には一切手を入れません。このページでは、ツール（エージェントが呼べる道具）を <strong>ファイルを1つ置くだけ</strong>・MCPサーバを <strong>JSONに1行足すだけ</strong>で追加できる仕組みと、その具体的な手順を初心者向けに解説します。</p>
+
+<h2>このページの前提</h2>
+<p>本プロジェクトは、ローカルで動くLLM（Ollama 上の <code>gpt-oss</code> など）を頭脳にしたチャット型の汎用AIエージェントです。ここでいう「ツール」とは、LLM が自分で判断して呼び出せる小さな関数のこと（例: 電卓・Web検索・現在時刻）。LLM は「いま電卓を使うべきだ」と判断すると、ツールを呼んで結果を受け取り、答えに反映します。</p>
+<p>本プロジェクトの4つの設計の柱のうち、最も重要なのが <strong>拡張性</strong> です。能力を増やすたびに中核コードを書き換えていると、変更が事故を生み、テストも壊れます。そこで本設計は「中核は固定したまま、外側を足すだけ」で機能が増える形にしています。全体像は<a href="02-architecture.html">システムアーキテクチャ</a>も参照してください。</p>
+
+<h2>2つの拡張ポイント</h2>
+<p>能力を増やす入口は、はっきり2種類だけです。どちらを使う場合でも、エージェント本体の組み立てコードを編集する必要はありません。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>拡張ポイント</th><th>追加方法</th><th>向いている用途</th><th>反映タイミング</th></tr>
+</thead>
+<tbody>
+<tr><td><span class="badge b-native">ネイティブツール</span></td><td><code>backend/app/tools/</code> に Python ファイルを1つ置く</td><td>Python で完結する処理（計算・整形・自前API呼び出しなど）</td><td>再起動</td></tr>
+<tr><td><span class="badge b-mcp">MCPサーバ</span></td><td><code>backend/mcp_servers.json</code> に設定を1つ足す</td><td>外部プロセス・他言語・公開されている既製サーバの利用</td><td>再起動</td></tr>
+</tbody>
+</table>
+</div>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">どちらを選ぶ？</p><p>「自分で短い Python を書けば済む」ならネイティブツール。「すでに世の中にあるサーバ（GitHub操作・時刻・ファイルアクセス等）を借りたい」なら MCP。MCP は Claude Desktop と同じ形式の設定なので、既存の MCP サーバをそのまま流用できます。</p></div></aside>
+
+<h2>ツール自動登録の仕組み</h2>
+<p>ネイティブツールが「ファイルを置くだけ」で有効になるのは、<code>backend/app/tools/registry.py</code> が <code>app/tools/</code> ディレクトリを自動でスキャンしているからです。スキャンは <code>pkgutil.iter_modules</code>（パッケージ内のモジュール一覧を取得する標準機能）で行われ、各モジュールの中に置かれた <strong>module-level の <code>BaseTool</code> インスタンス</strong>（<code>@tool</code> で作られたツールオブジェクト）を見つけて登録します。</p>
+<p>下の図は <code>discover_package()</code> の探索の流れです。仕組み自体には何も改造を入れず、ただファイルを増やすだけで点線部分（あなたの新しいツール）が自動で取り込まれます。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  A["build_registry() 起動"] --> B["app.tools パッケージを import"]
+  B --> C["pkgutil.iter_modules で<br/>モジュール一覧を取得"]
+  C --> D{"モジュール名は<br/>registry / base / __init__ ?"}
+  D -- "はい (除外)" --> C
+  D -- "いいえ" --> E["モジュールを import"]
+  E --> F["module-level の値を走査"]
+  F --> G{"BaseTool の<br/>インスタンス ?"}
+  G -- "いいえ" --> F
+  G -- "はい" --> H["register(tool, source='native')"]
+  H --> I{"同じツール名が<br/>既に登録済み ?"}
+  I -- "はい" --> J["ValueError で停止<br/>(重複検出)"]
+  I -- "いいえ" --> K["レジストリに追加"]
+  K --> C
+  C --> L["discover_entry_points()<br/>entry_points group='agent.tools'"]
+  L --> M["プラグイン製ツールも<br/>source='plugin' で登録"]
+</pre><figcaption>図1: registry.py によるツール自動探索の流れ（ネイティブ + サードパーティプラグイン）</figcaption></figure>
+
+<p>ポイントを設計事実として整理します。</p>
+<ul>
+<li><strong>除外モジュール</strong>: <code>registry</code> / <code>base</code> / <code>__init__</code> の3つはスキャン対象から外れます（<code>_EXCLUDED_MODULES</code>）。レジストリ自身や基底定義をツールと誤認しないためです。</li>
+<li><strong>登録対象</strong>: モジュールの中で <code>isinstance(obj, BaseTool)</code> が真になるオブジェクトだけを登録します。<code>@tool</code> を付けた関数はこの <code>BaseTool</code> インスタンスになります。</li>
+<li><strong>名前の重複は即エラー</strong>: <code>register()</code> は同じ <code>tool.name</code> が既にあると <code>ValueError("duplicate tool name: ...")</code> を投げます。気づかないうちに同名ツールが2つできる事故を、起動時に必ず検出します。</li>
+<li><strong>サードパーティ製も探索</strong>: <code>discover_entry_points()</code> が <code>importlib.metadata.entry_points(group="agent.tools")</code> を読み、pip でインストールされた別パッケージのツールも取り込みます（こちらは <code>source="plugin"</code>）。プラグインのロードに失敗しても例外をログに出して読み飛ばし、全体は止めません。</li>
+</ul>
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">source の意味</p><p>登録時に各ツールには出所ラベル（<code>native</code> / <code>plugin</code>）が付きます。MCP 由来は <code>mcp</code>、記憶ツールは <code>langmem</code> として後段で合流します。この出所は <code>GET /api/tools</code> の一覧で確認できます（後述）。</p></div></aside>
+
+<h2>同梱されているサンプルツール</h2>
+<p>実装の手本として、最初から3つのネイティブツールが <code>app/tools/</code> に置かれています。いずれも <code>@tool</code> 付き関数で、docstring（関数の説明文）がそのまま「このツールが何をするか」の説明として LLM に渡ります。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>ツール名</th><th>ファイル</th><th>引数</th><th>戻り値（要約）</th></tr>
+</thead>
+<tbody>
+<tr><td><code>calculate</code></td><td><code>tools/calculator.py</code></td><td><code>expression: str</code></td><td>数式を安全に評価した結果の文字列（四則演算・べき乗・剰余）</td></tr>
+<tr><td><code>current_datetime</code></td><td><code>tools/datetime_tool.py</code></td><td>なし</td><td>現在の日時（JST）を「年月日 時刻 + 曜日」で返す</td></tr>
+<tr><td><code>web_search</code></td><td><code>tools/web_search.py</code></td><td><code>query: str</code></td><td>DuckDuckGo で検索した上位最大5件のタイトルと概要（APIキー不要）</td></tr>
+</tbody>
+</table>
+</div>
+<p>たとえば電卓ツールは、危険な式の実行を避けるため <code>eval()</code> を使わず、<code>ast</code>（Python の構文解析）で式を読み取り、許可した演算子だけを使って計算します。これは「外部から渡された文字列を安全に評価する」良い例です。</p>
+
+<h2>ネイティブツールを足す手順</h2>
+<p>新しい道具を増やす一番手軽な方法です。やることは「ファイルを作る」「関数に <code>@tool</code> を付ける」「再起動する」の3つだけ。レジストリ側のコードは触りません。</p>
+<ol class="steps">
+<li><code>backend/app/tools/</code> の中に新しいファイル（例: <code>weather.py</code>）を作ります。ファイル名は <code>registry</code> / <code>base</code> / <code>__init__</code> 以外なら自由です。</li>
+<li>その中で <code>@tool</code> を付けた関数を <strong>module level に</strong> 定義します。引数には型ヒントを付け、docstring に「何をするツールか」を日本語で簡潔に書きます。この docstring が LLM への説明になるため、丁寧に書くほど呼び出しの精度が上がります。</li>
+<li>バックエンドを再起動します。起動時に <code>discover_package()</code> がファイルを見つけ、関数を自動登録します。</li>
+<li><code>GET /api/tools</code> で一覧に出ているか、あるいはチャットで実際に呼ばれるかを確認します。</li>
+</ol>
+
+<p>最小の実装例です（既存サンプルと同じ書き方）。<code>@tool</code> を付けた時点で関数は <code>BaseTool</code> インスタンスになり、自動登録の対象になります。</p>
+<span class="code-label">backend/app/tools/weather.py</span>
+<pre><code>"""サンプル: 自作ツールの最小例。"""
+
+from langchain_core.tools import tool
+
+
+@tool
+def get_weather(city: str) -&gt; str:
+    """指定した都市の天気を返す。city には都市名を渡す。"""
+    # 実際にはここで外部APIなどを呼ぶ
+    return f"{city} は晴れ、気温 22℃ です。"
+</code></pre>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">名前の衝突に注意</p><p>ツール名（<code>@tool</code> 付き関数名、または明示指定した名前）が既存ツールと重複すると、起動時に <code>ValueError: duplicate tool name</code> が出てエージェントが立ち上がりません。これは「壊れた状態で気づかず動き続ける」ことを防ぐ、わざとの安全装置です。名前は他とかぶらない具体的なものにしましょう。</p></div></aside>
+
+<h2>MCPローダーの仕組み</h2>
+<p>MCP（Model Context Protocol、外部のツール群を標準化された方法で呼び出すための取り決め）を使うと、自分で Python を書かなくても、世の中に公開されている既製サーバの機能をツールとして取り込めます。設定の入口は <code>backend/mcp_servers.json</code> ただ1つで、これは Claude Desktop と同じ <code>{"mcpServers": {...}}</code> 形式です。</p>
+<p>読み込みは <code>backend/app/mcp/loader.py</code> が担当します。次の図がその処理の流れです。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  A["load_mcp_config(path)"] --> B{"mcp_servers.json は<br/>存在する ?"}
+  B -- "いいえ" --> C["空 {} を返す<br/>(MCP無しで起動)"]
+  B -- "はい" --> D["JSON を読み 'mcpServers' を取得"]
+  D --> E["値の中の ${ENV_VAR} を<br/>環境変数で置換"]
+  E --> F{"各サーバに<br/>transport 指定あり ?"}
+  F -- "あり" --> I
+  F -- "command がある" --> G["transport='stdio' を補完"]
+  F -- "url がある" --> H["transport='streamable_http' を補完"]
+  F -- "どちらも無い" --> X["ValueError で停止"]
+  G --> I["設定 dict 完成"]
+  H --> I
+  I --> J["build_mcp_client():<br/>MultiServerMCPClient(tool_name_prefix=True)"]
+  J --> K["get_mcp_tools():<br/>client.get_tools() でツール取得"]
+</pre><figcaption>図2: loader.py による MCP 設定の読み込みとクライアント生成</figcaption></figure>
+
+<p>設計事実として押さえるべき挙動は次のとおりです。</p>
+<ul>
+<li><strong>ファイルが無ければ何もしない</strong>: <code>mcp_servers.json</code> が存在しなければ空の設定を返し、MCP無しでそのまま起動します。現在の同梱ファイルは <code>{"mcpServers": {}}</code> で、デフォルトでは MCP サーバは登録されていません。</li>
+<li><strong>シークレットの環境変数置換</strong>: 設定値の中の <code>${ENV_VAR}</code> という記法は、起動時に同名の環境変数の値へ置き換わります（<code>_substitute_env</code>）。トークンなどの秘密情報を JSON に直書きせず済みます。なお該当する環境変数が無い場合は空文字に置換されます。</li>
+<li><strong>transport の自動補完</strong>: 設定に <code>transport</code> が無くても、<code>command</code> があれば <code>stdio</code>（子プロセスとして起動）、<code>url</code> があれば <code>streamable_http</code>（HTTP接続）を自動で補います。どちらも無ければ <code>ValueError</code> で設定ミスを知らせます。</li>
+<li><strong>名前衝突の回避</strong>: クライアントは <code>MultiServerMCPClient(config, tool_name_prefix=True)</code> で作られます。<code>tool_name_prefix=True</code> により、各ツール名にサーバ名のプレフィックスが付くため、別々のMCPサーバが同名ツールを持っていてもぶつかりません。</li>
+<li><strong>ステートレスな取得</strong>: ツール一覧は <code>get_tools()</code> を呼んで取得します。状態を持たないため、必要なときに集めるだけのシンプルな構造です。</li>
+</ul>
+
+<h2>MCPサーバを足す手順</h2>
+<p>MCP サーバの追加は、<code>backend/mcp_servers.json</code> の <code>mcpServers</code> にエントリを1つ書き加えるだけです。コア側の変更はありません。</p>
+<ol class="steps">
+<li><code>backend/mcp_servers.json</code> を開き、<code>mcpServers</code> オブジェクトの中に新しいキー（サーバ名）を追加します。サーバ名は分かりやすい短い名前にします（ツール名のプレフィックスになります）。</li>
+<li>子プロセス型のサーバなら <code>command</code> と <code>args</code> を、HTTP型のサーバなら <code>url</code> を指定します（<code>transport</code> は省略可。前述のとおり自動補完されます）。</li>
+<li>トークンなどの秘密情報は値に直書きせず、<code>"${ENV_VAR}"</code> の形で書き、実際の値は環境変数で渡します。</li>
+<li>バックエンドを再起動すると、ローダーが新しいサーバのツールを取り込みます。</li>
+</ol>
+
+<p>下は記述例です（<code>time</code> は子プロセス型 stdio、<code>github</code> は環境変数でトークンを注入する例）。</p>
+<span class="code-label">backend/mcp_servers.json</span>
+<pre><code>{
+  "mcpServers": {
+    "time": {
+      "command": "uvx",
+      "args": ["mcp-server-time"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
+</code></pre>
+
+<p>HTTP 型のサーバを使う場合は、<code>command</code> の代わりに <code>url</code> を書きます。<code>transport</code> は <code>streamable_http</code> として自動補完されます。</p>
+<pre><code>{
+  "mcpServers": {
+    "remote-tools": {
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+</code></pre>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">${GITHUB_TOKEN} はどこで設定する？</p><p>JSON に書いた <code>${GITHUB_TOKEN}</code> は、バックエンドのプロセスに環境変数 <code>GITHUB_TOKEN</code> として渡しておくと、起動時にその値へ置き換わります。設定方法は<a href="10-setup.html">セットアップと運用</a>を参照してください。</p></div></aside>
+
+<h2>起動時のツール集約</h2>
+<p>ここまでの2つの拡張ポイントは、エージェント起動時に1か所へ合流します。ネイティブツール、サードパーティプラグイン、長期記憶用のLangMemツール、そして MCP ツールを集めて、最終的に <code>create_agent</code>（LangGraph のエージェント生成）へまとめて渡します。中核コードは「集めたツールを受け取る」だけで、何が増えたかを知る必要はありません。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  participant Boot as "起動処理"
+  participant Reg as "registry.py"
+  participant Mem as "LangMem"
+  participant Mcp as "mcp/loader.py"
+  participant Agent as "create_agent"
+  Boot->>Reg: build_registry()
+  Reg-->>Boot: ネイティブ + プラグインのツール一覧
+  Boot->>Mem: 記憶ツールを用意
+  Mem-->>Boot: langmem ツール
+  Boot->>Mcp: load_mcp_config() / get_mcp_tools()
+  Mcp-->>Boot: MCP ツール (サーバ名プレフィックス付き)
+  Note over Boot: すべてのツールを1つのリストに集約
+  Boot->>Agent: tools=[...] を渡してエージェント生成
+  Agent-->>Boot: ツールを使えるエージェント
+</pre><figcaption>図3: 起動時に4つの出所のツールを集約して create_agent へ渡す流れ</figcaption></figure>
+
+<p>集約された結果は API から確認できます。<span class="badge b-get">GET</span> <code>/api/tools</code> を呼ぶと、各ツールに <code>source</code>（<code>native</code> / <code>plugin</code> / <code>langmem</code> / <code>mcp</code>）が付いた一覧が返ります。出所ラベルは <code>describe()</code> が <code>{"name", "description", "source"}</code> の形で組み立てています。どのツールが何由来で有効になっているかを一目で確認できるので、追加後の動作チェックに使えます。詳細は<a href="07-api-reference.html">APIリファレンス</a>を参照してください。</p>
+<p>記憶（LangMem）まわりの詳しい仕組みは<a href="04-memory.html">記憶アーキテクチャ</a>、ツール呼び出しを含む応答がどう画面へ流れるかは<a href="05-streaming.html">ストリーミング設計</a>で扱います。</p>
+
+<h2>設計上の注意</h2>
+<p>最後に、拡張するときに知っておくべき制約をまとめます。</p>
+<ul>
+<li><strong>ホットリロードは無し</strong>: ツールや MCP の追加・変更は <strong>再起動で反映</strong>されます。実行中のプロセスに動的に差し込む仕組みはありません。落ち着いて「ファイルを直す → 再起動 → <code>/api/tools</code> で確認」の順で進めましょう。</li>
+<li><strong>名前は必ずユニークに</strong>: ネイティブツールはツール名が重複すると起動時に <code>ValueError</code> で止まります。MCP はサーバ名プレフィックスで衝突を避けますが、サーバ名どうしは分かりやすく区別できる名前にしてください。</li>
+<li><strong>docstring が説明文</strong>: ネイティブツールの docstring はそのまま LLM への説明になります。曖昧だと LLM が呼び出しを誤るため、用途と引数の意味を簡潔に書きましょう。</li>
+<li><strong>コアは無改修が原則</strong>: <code>graph.py</code> など中核を編集せずに能力を増やせるのが本設計の狙いです。拡張のたびに中核を触りたくなったら、それは拡張ポイントの使い方を見直すサインです。</li>
+</ul>
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">秘密情報を JSON に直書きしない</p><p>API トークンやパスワードを <code>mcp_servers.json</code> に生の文字列で書くと、リポジトリに残って漏えいの原因になります。必ず <code>"${ENV_VAR}"</code> 記法と環境変数を組み合わせてください。</p></div></aside>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

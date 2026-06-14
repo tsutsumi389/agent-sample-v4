@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>記憶アーキテクチャ — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>記憶アーキテクチャ</span></nav>
+<h1>記憶アーキテクチャ</h1>
+<p class="lead">このAIエージェントは「いまの会話の流れ」を覚える<strong>短期記憶</strong>と、「ユーザーの好みや事実」を会話をまたいで覚える<strong>長期記憶</strong>の2つを使い分けます。このページでは、それぞれが何のためにあり、どう保存・検索されるのかを、実装に沿って丁寧に解説します。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>このエージェントは Ollama 上のローカルLLMを頭脳にするチャット型エージェントです。v1 はシングルユーザーで、ユーザーを表す <code>user_id</code> は固定値 <code>"default-user"</code> です。ただしコードは <code>user_id</code> を引数として貫通させる設計になっているため、将来の複数ユーザー化にもそのまま備えられます。詳しくは<a href="02-architecture.html">システムアーキテクチャ</a>を参照してください。</p></div></aside>
+
+<h2>2種類の記憶</h2>
+<p>人間の記憶に「いま話している内容を覚えておく作業記憶」と「昨日聞いた相手の好みを覚えている長期記憶」があるように、このエージェントも記憶を2層に分けています。役割がまったく違うため、保存場所も保存単位も別々です。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TB
+  U["ユーザーの発言"] --> A["エージェント (LangGraph)"]
+  A --> S["短期記憶<br/>checkpointer<br/>(AsyncPostgresSaver)"]
+  A --> L["長期記憶<br/>Store + ベクトル検索<br/>(AsyncPostgresStore)"]
+  S -.->|"thread 単位<br/>会話の流れ"| DB1[("PostgreSQL")]
+  L -.->|"user 単位<br/>好み・事実"| DB1
+</pre><figcaption>図1: 短期記憶と長期記憶は、どちらも PostgreSQL に保存されるが、保存単位（thread か user か）と用途が異なる</figcaption></figure>
+
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>短期記憶</th><th>長期記憶</th></tr></thead>
+<tbody>
+<tr><td>覚えるもの</td><td>いまの会話のやりとり（発言の履歴）</td><td>ユーザーの好み・事実・嗜好</td></tr>
+<tr><td>保存の単位</td><td>会話スレッド（<code>thread_id</code>）ごと</td><td>ユーザー（<code>user_id</code>）ごと</td></tr>
+<tr><td>会話をまたぐか</td><td>またがない（その会話だけ）</td><td>またぐ（別の会話でも思い出せる）</td></tr>
+<tr><td>仕組み</td><td>checkpointer = <code>AsyncPostgresSaver</code></td><td>Store = <code>AsyncPostgresStore</code> + ベクトル検索</td></tr>
+<tr><td>検索方法</td><td>そのスレッドの履歴をそのまま読み込む</td><td>キーワード一覧 / 意味の近さ（セマンティック検索）</td></tr>
+</tbody>
+</table></div>
+
+<p>ここで出てきた用語を補足します。<code>checkpointer</code>（チェックポインター）は、会話の途中経過をデータベースに保存しておく仕組みです。<code>Store</code>（ストア）は、会話とは独立した「メモ帳」のような保存領域で、ここに保存した記憶はベクトル（数値の並び）に変換され、意味の近さで検索できます。短期記憶側の詳細は<a href="08-data-model.html">データモデルと永続化</a>でも扱います。</p>
+
+<h2>長期記憶のハイブリッド方式</h2>
+<p>長期記憶は、性格の異なる2つの方法を組み合わせて作られています。片方だけでは「会話中にユーザーが明示した好みをすぐ反映する」ことと「会話全体をあとからじっくり振り返って事実を抽出する」ことを両立できないため、両方を使います。これらはどちらも <a href="https://github.com/langchain-ai/langmem">LangMem</a> というライブラリの機能で実現しています。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  subgraph HOT["① hot-path (会話中)"]
+    T1["create_manage_memory_tool<br/>(保存ツール)"]
+    T2["create_search_memory_tool<br/>(検索ツール)"]
+  end
+  subgraph BG["② バックグラウンド統合"]
+    M["create_memory_store_manager<br/>(qwen3, enable_inserts=True)"]
+    R["ReflectionExecutor<br/>(後追いで実行)"]
+  end
+  HOT --> ST[("Store<br/>(memories, user_id)")]
+  BG --> ST
+</pre><figcaption>図2: 長期記憶は「会話中にエージェント自身が呼ぶツール」と「ターン後に裏で走る抽出」の2系統で Store を更新する</figcaption></figure>
+
+<div class="table-wrap"><table>
+<thead><tr><th>方式</th><th>いつ動く</th><th>誰が動かす</th><th>使う部品</th></tr></thead>
+<tbody>
+<tr><td>① hot-path ツール</td><td>会話の最中（即時）</td><td>エージェント自身が必要に応じてツールを呼ぶ</td><td><code>create_manage_memory_tool</code> / <code>create_search_memory_tool</code></td></tr>
+<tr><td>② バックグラウンド統合</td><td>チャットのターン完了後（少し遅れて）</td><td>システムが自動でスケジュール</td><td><code>create_memory_store_manager</code> + <code>ReflectionExecutor</code></td></tr>
+</tbody>
+</table></div>
+
+<p>① は会話の流れの中でエージェントが「これは覚えておこう」「あれって何だっけ」と判断して実行するため、結果がツールの実行ログやメモリパネルにすぐ現れます（ツールの可視化については<a href="05-streaming.html">ストリーミング設計</a>を参照）。② はユーザーを待たせずに、会話全体を後から振り返って事実を抽出します。役割が補完的なので、両方を併用します。</p>
+
+<h2>会話中の記憶（hot-path）</h2>
+<p>hot-path（ホットパス、＝ユーザーを待たせる「主経路」）では、エージェントに2つの記憶ツールを持たせます。実装は <code>backend/app/memory/tools.py</code> の <code>langmem_hotpath_tools()</code> で、<code>create_manage_memory_tool</code>（保存・更新・削除用）と <code>create_search_memory_tool</code>（検索用）の2つを返すだけのシンプルな構成です。どちらにも同じ <code>namespace</code> と <code>store</code> を渡します。</p>
+
+<pre class="code-label">backend/app/memory/tools.py</pre>
+<pre><code>MEMORY_NAMESPACE = ("memories", "{langgraph_user_id}")
+
+def langmem_hotpath_tools(store: BaseStore) -&gt; list[BaseTool]:
+    return [
+        create_manage_memory_tool(namespace=MEMORY_NAMESPACE, store=store),
+        create_search_memory_tool(namespace=MEMORY_NAMESPACE, store=store),
+    ]
+</code></pre>
+
+<p>ここで <code>namespace</code>（ネームスペース＝記憶の置き場所を区切る名札）に <code>"{langgraph_user_id}"</code> という<strong>プレースホルダ</strong>が入っている点が重要です。これは実行時に、その会話のユーザーID（<code>langgraph_user_id</code>）へ自動で置き換わります。つまり同じツール定義でも、保存先は常に「そのユーザー専用の棚」になります。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor User as "ユーザー"
+  participant Agent as "エージェント (gpt-oss)"
+  participant Tool as "manage / search ツール"
+  participant Store as "Store (memories, user_id)"
+  User->>Agent: 私はコーヒーが好き
+  Agent->>Tool: manage_memory("コーヒーが好き")
+  Tool->>Store: 記憶を保存 (upsert)
+  Store-->>Tool: 保存完了
+  Tool-->>Agent: 結果
+  Note over User,Store: --- 別の質問 ---
+  User->>Agent: 私の好きな飲み物は?
+  Agent->>Tool: search_memory("好きな飲み物")
+  Tool->>Store: 意味の近い記憶を検索
+  Store-->>Tool: コーヒーが好き
+  Tool-->>Agent: 検索結果
+  Agent-->>User: コーヒーがお好きでしたね
+</pre><figcaption>図3: hot-path では、エージェント自身が会話中に保存ツール・検索ツールを呼んで Store を読み書きする</figcaption></figure>
+
+<p>このように、保存も検索もエージェントの「ツール呼び出し」として行われるため、ユーザーは「いま記憶が保存された／参照された」という動きを画面で確認できます。</p>
+
+<h2>バックグラウンド統合の流れ</h2>
+<p>hot-path だけだと、エージェントがツールを呼び忘れた事実は記憶に残りません。そこで、チャットのターンが終わるたびに、会話全体を裏で振り返って記憶を抽出する仕組みを併用します。これが <code>backend/app/memory/manager.py</code> の役割です。</p>
+
+<p>中心となるのが <code>build_reflection_executor()</code> です。ここでは抽出用のLLMとして <strong>qwen3</strong>（設定値 <code>settings.memory_model</code>）を <code>num_ctx=8192</code>・<code>temperature=0</code>・<code>reasoning=False</code> で用意し、それを <code>create_memory_store_manager(..., enable_inserts=True, store=store)</code> に渡してマネージャを作ります。<code>enable_inserts=True</code> は「新しい記憶の追加（insert）を許可する」設定です。最後にそのマネージャを <code>ReflectionExecutor</code>（後追いで非同期実行する実行器）でラップして返します。</p>
+
+<pre class="code-label">backend/app/memory/manager.py</pre>
+<pre><code>extraction_model = ChatOllama(
+    model=settings.memory_model,   # qwen3
+    base_url=settings.ollama_base_url,
+    reasoning=False,
+    num_ctx=8192,
+    temperature=0,
+)
+manager = create_memory_store_manager(
+    extraction_model,
+    namespace=MEMORY_NAMESPACE,
+    enable_inserts=True,
+    store=store,
+)
+return ReflectionExecutor(manager, store=store)
+</code></pre>
+
+<p>実際のスケジュールは <code>schedule_reflection()</code> が行います。ターン完了時に <code>executor.submit({"messages": messages}, ..., thread_id=thread_id, after_seconds=after_seconds)</code> を呼び、「いまから <code>after_seconds</code> 秒後に、このスレッドの会話から記憶を抽出してね」と予約します。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  participant Chat as "チャット処理"
+  participant Exec as "ReflectionExecutor"
+  participant Q as "qwen3 (抽出モデル)"
+  participant Store as "Store (memories, user_id)"
+  Chat->>Exec: submit(messages, thread_id, after_seconds=30)
+  Note over Exec: 30秒待つ
+  Chat->>Exec: 同じ thread_id で再 submit (続けて発言)
+  Note over Exec: 前の保留タスクをキャンセル<br/>(debounce)
+  Note over Exec: 30秒待つ
+  Exec->>Q: 会話から記憶を抽出
+  Q-->>Exec: 抽出した事実
+  Exec->>Store: 記憶を upsert
+</pre><figcaption>図4: submit は after_seconds 秒の遅延を持ち、同じ thread_id で再 submit すると保留中タスクがキャンセル（debounce）される</figcaption></figure>
+
+<p>ここで効いているのが <strong>debounce（デバウンス＝連続入力をまとめる仕組み）</strong>です。<code>submit</code> に同じ <code>thread_id</code> を渡すと、まだ実行されていない前回の予約がキャンセルされ、最後の1回だけが走ります。ユーザーが立て続けに発言しても、抽出処理が何度も無駄に走ることを防げます。</p>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">渡すのは「ターンの差分」ではなく「スレッド全体」</p><p>debounce でキャンセルされたターンの内容が失われないよう、<code>schedule_reflection()</code> のコメントにある通り、呼び出し側は<strong>そのターンの差分ではなくスレッドの全会話メッセージ</strong>を渡します。こうすれば、最後に1回だけ実行されても、会話の全内容から漏れなく抽出できます。</p></div></aside>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">なぜ gpt-oss ではなく qwen3 で抽出するのか</p><p>会話の本体（チャットとツール呼び出し）は gpt-oss が担いますが、記憶抽出だけは qwen3 を使います。LangMem の記憶抽出は内部で <code>trustcall</code> による<strong>構造化出力</strong>（決まった形のJSONを返させる処理）に依存しますが、これが gpt-oss + Ollama の組み合わせでは不安定でした（<a href="https://github.com/langchain-ai/langchain/issues/33116">langchain#33116</a>）。そのため、構造化出力を安定して返せる qwen3 を抽出専用モデルに割り当てています。モデルの役割分担は<a href="01-overview.html">はじめに</a>も参照してください。</p></div></aside>
+
+<h2>メモリパネル用の取得</h2>
+<p>画面のメモリパネルに記憶の一覧を表示したり、キーワードで絞り込んだりするための問い合わせは <code>backend/app/memory/store_query.py</code> にまとまっています。中心は <code>list_memories()</code> です。</p>
+
+<p>この関数は <code>namespace = ("memories", user_id)</code> を組み立て、引数 <code>query</code> の有無で動きを変えます。</p>
+<ul>
+<li><strong>query がある場合</strong>: <code>store.asearch(namespace, query=query, limit=limit)</code> を呼び、意味の近い記憶（セマンティック検索の結果）を返します。各記憶には類似度を表す <code>score</code> が付きます。</li>
+<li><strong>query がない場合</strong>: <code>store.asearch(namespace, limit=limit + 50)</code> で多めに取得したあと、コード側で <code>updated_at</code>（更新日時）の降順に並べ替えて先頭 <code>limit</code> 件を返します。<code>asearch</code> は並び順を保証しないため、新しい順を保証するためにこの後処理を入れています。</li>
+</ul>
+
+<p>取得した各記憶は、<code>key</code> / <code>content</code> / <code>namespace</code> / <code>updated_at</code> / <code>score</code> を持つ辞書に整形されます。<code>content</code> は <code>_to_text()</code> ヘルパで人間が読める文字列に変換されます。これは LangMem が記憶を <code>{"kind": ..., "content": {...}}</code> のような入れ子の形で持つことがあるため、<code>content</code> キーを再帰的にたどってテキスト化するためです。なお <code>updated_at</code> は <code>_iso_z()</code> で UTC の ISO 形式（末尾 <code>Z</code>）に揃えられます。</p>
+
+<p>記憶の削除は <code>delete_memory()</code> が担当し、<code>store.adelete(("memories", user_id), key)</code> で指定した <code>key</code> の1件を消します。これらの関数がフロントの<a href="07-api-reference.html">API</a>から呼ばれ、<a href="09-frontend.html">フロントエンド</a>のメモリパネルに反映されます。</p>
+
+<h2>namespace 設計</h2>
+<p>長期記憶のすべての保存・検索・削除は、<code>("memories", user_id)</code> という2要素の <code>namespace</code> を通して行われます。先頭の <code>"memories"</code> は記憶の種類を表す固定の名札で、2つ目の <code>user_id</code> によってユーザーごとに棚が完全に分かれます。これにより、あるユーザーの記憶が別のユーザーから見えることはありません。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TB
+  ROOT["Store"] --> NS["memories"]
+  NS --> A["('memories', 'alice')<br/>alice の記憶"]
+  NS --> B["('memories', 'bob')<br/>bob の記憶"]
+  NS --> D["('memories', 'default-user')<br/>v1 のシングルユーザー"]
+  A --> A1["コーヒーが好き"]
+  A --> A2["朝型である"]
+  B --> B1["紅茶が好き"]
+</pre><figcaption>図5: namespace の2つ目を user_id にすることで、記憶がユーザー単位で分離される。v1 では default-user 一つだけが使われる</figcaption></figure>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">namespace はバイト単位で一致させる</p><p><code>tools.py</code> のコメントにある通り、<code>MEMORY_NAMESPACE</code> は <code>manager.py</code> / <code>store_query.py</code> と<strong>バイト単位で一致</strong>させる必要があります（<a href="https://github.com/langchain-ai/langmem/issues/140">langmem#140</a>）。hot-path とバックグラウンド統合はプレースホルダ <code>"{langgraph_user_id}"</code> 付きの定数 <code>MEMORY_NAMESPACE</code> を共有し、メモリパネル取得側は実際の <code>user_id</code> を埋めた <code>("memories", user_id)</code> を使います。書き込み先と読み出し先がズレると記憶が見つからなくなるため、ここは慎重に揃えています。</p></div></aside>
+
+<h2>限界（明記）</h2>
+<p>バックグラウンド統合は便利ですが、無制限に信頼できる仕組みではありません。設計上の限界をはっきり書いておきます。</p>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">バックグラウンド統合は best-effort（ベストエフォート）</p><p><code>ReflectionExecutor</code> は<strong>同じプロセス内のバックグラウンドスレッド</strong>で動きます。<code>after_seconds</code> 秒の遅延中（debounce 待ち）にプロセスが落ちると、その保留中タスクは失われます。<code>schedule_reflection()</code> の例外処理もログを残すだけで、再実行は保証しません。つまりバックグラウンド統合は「できる範囲で頑張る（best-effort）」ものであり、確実に記憶される保証はありません。確実に残したい情報は、hot-path の保存ツールで会話中に明示的に保存するのが安全です。</p></div></aside>
+
+<p>この best-effort な性質は、設計の4本柱のうち「シンプルさ」を優先した結果でもあります。外部のジョブキューを持ち込まず、インプロセスで完結させることで構成を単純に保っています。記憶を確実に残す経路（hot-path）と、ベストエフォートで補強する経路（バックグラウンド）の二段構えにすることで、シンプルさと実用性のバランスを取っています。次は<a href="05-streaming.html">ストリーミング設計</a>で、これらのツール実行がどう画面に流れるかを見ていきましょう。</p>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

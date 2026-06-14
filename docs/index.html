@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>汎用AIエージェント — 設計書</title>
+  <meta name="description" content="LangGraph + Ollama + LangMem で構築するチャットベース汎用AIエージェントの設計書。初見者向けに図解で解説します。">
+  <link rel="stylesheet" href="assets/style.css">
+  <script type="module" src="assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+
+    <main id="main" class="content" style="padding-top:0">
+      <section class="hero">
+        <span class="eyebrow">LangGraph · Ollama · LangMem · FastAPI · React</span>
+        <h1>ローカルLLMで動く<br>汎用AIエージェント 設計書</h1>
+        <p>
+          自分のPC上の LLM（Ollama / gpt-oss）を頭脳に、会話・ツール実行・長期記憶を備えた
+          チャットエージェントを動かすためのアーキテクチャ設計書です。
+          <strong>初めての方</strong>でも全体像をつかめるよう、図とシーケンス図で解説します。
+        </p>
+        <div class="cta">
+          <a class="primary" href="guide/01-overview.html">はじめに →</a>
+          <a class="ghost" href="guide/03-multi-agent.html">エージェントの中身を見る</a>
+        </div>
+      </section>
+
+      <div class="wrap">
+        <figure class="figure">
+          <pre class="mermaid">
+flowchart LR
+  user(["👤 ユーザー"]) -->|チャット| FE["💻 フロントエンド<br/>React + Vite"]
+  FE <-->|HTTP / SSE| BE["⚙️ バックエンド<br/>FastAPI"]
+  BE -->|エージェント実行| AG{{"🧠 マルチエージェント<br/>LangGraph"}}
+  AG -->|推論・ツール| OL["🦙 Ollama<br/>gpt-oss / qwen3"]
+  BE <-->|会話履歴・長期記憶| PG[("🗃️ PostgreSQL<br/>+ pgvector")]
+  AG -.外部連携.-> MCP["🔌 MCPサーバ<br/>/ ネイティブツール"]
+  classDef u fill:#ddeafe,stroke:#2f6feb,color:#1f2328;
+  classDef s fill:#f0e6ff,stroke:#8957e5,color:#1f2328;
+  class user u; class AG s;
+          </pre>
+          <figcaption>システム全体像 — ブラウザからの1つのチャットが、エージェント・LLM・DB・ツールへどう広がるか</figcaption>
+        </figure>
+      </div>
+
+      <div class="wrap">
+        <div class="section-head">
+          <h2>設計書の歩き方</h2>
+          <p>上から順に読むと、概念 → 構造 → 各機能の詳細 → 運用 の流れで理解できます。</p>
+        </div>
+
+        <div class="card-grid">
+          <a class="card" href="guide/01-overview.html">
+            <div class="ic">🚀</div><div class="kx">01 · まず読む</div>
+            <h3>はじめに</h3><p>何を作るのか、ゴール、登場人物（用語集）と全体像。</p>
+          </a>
+          <a class="card" href="guide/02-architecture.html">
+            <div class="ic">🏛️</div><div class="kx">02</div>
+            <h3>システムアーキテクチャ</h3><p>フロント / バック / DB / LLM の構成と技術選定の理由。</p>
+          </a>
+          <a class="card" href="guide/03-multi-agent.html">
+            <div class="ic">🧠</div><div class="kx">03 · 核心</div>
+            <h3>マルチエージェント設計</h3><p>4役（指揮・計画・実行・評価）のグラフと決定論的な制御。</p>
+          </a>
+          <a class="card" href="guide/04-memory.html">
+            <div class="ic">🧩</div><div class="kx">04</div>
+            <h3>記憶アーキテクチャ</h3><p>会話の短期記憶と、使うほど賢くなる長期記憶。</p>
+          </a>
+          <a class="card" href="guide/05-streaming.html">
+            <div class="ic">📡</div><div class="kx">05</div>
+            <h3>ストリーミング設計</h3><p>SSE でトークン・ツール・進捗をリアルタイム配信。</p>
+          </a>
+          <a class="card" href="guide/06-extensibility.html">
+            <div class="ic">🔌</div><div class="kx">06 · 最重要</div>
+            <h3>拡張ガイド</h3><p>コアを変えずにツール・MCPサーバを追加する仕組み。</p>
+          </a>
+          <a class="card" href="guide/07-api-reference.html">
+            <div class="ic">📖</div><div class="kx">07</div>
+            <h3>API リファレンス</h3><p>全エンドポイントと SSE イベントの厳密な仕様。</p>
+          </a>
+          <a class="card" href="guide/08-data-model.html">
+            <div class="ic">🗃️</div><div class="kx">08</div>
+            <h3>データモデルと永続化</h3><p>checkpoints / store / threads と user_id namespace。</p>
+          </a>
+          <a class="card" href="guide/09-frontend.html">
+            <div class="ic">💻</div><div class="kx">09</div>
+            <h3>フロントエンド設計</h3><p>React コンポーネント構成と SSE 受信フック。</p>
+          </a>
+          <a class="card" href="guide/10-setup.html">
+            <div class="ic">⚙️</div><div class="kx">10</div>
+            <h3>セットアップと運用</h3><p>前提・クイックスタート・トラブルシュート。</p>
+          </a>
+        </div>
+
+        <div class="section-head">
+          <h2>このエージェントの特徴</h2>
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="ic">🏠</div><h3>ローカルで完結</h3>
+            <p>Ollama 上の LLM を使うため、外部APIに会話を送らずローカルで動作します。</p>
+          </div>
+          <div class="card">
+            <div class="ic">🔌</div><h3>コア無改修で拡張</h3>
+            <p>ツールはファイルを置くだけ、MCPはJSONに1行足すだけ。<code>graph.py</code> は触りません。</p>
+          </div>
+          <div class="card">
+            <div class="ic">🧩</div><h3>使うほど最適化</h3>
+            <p>LangMem がバックグラウンドで会話から記憶を抽出・統合し、あなたに合わせます。</p>
+          </div>
+          <div class="card">
+            <div class="ic">🛡️</div><h3>LLM性能に依存しない堅牢さ</h3>
+            <p>ルーティング・停止判定はコードが決定論的に制御。全経路が必ず終了します。</p>
+          </div>
+        </div>
+      </div>
+
+      <nav id="pager" class="pager"></nav>
+    </main>
+
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+
+  <footer class="sitefoot">
+    汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画
+  </footer>
+</body>
+</html>

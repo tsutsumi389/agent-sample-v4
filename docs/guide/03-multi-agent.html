@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>マルチエージェント設計 — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>マルチエージェント設計</span></nav>
+<h1>マルチエージェント設計</h1>
+<p class="lead">このプロジェクトの核心です。ローカルLLM（手元のPCで動かす言語モデル）の性能に頼りきらず、長く複雑なタスクでも最後まで完走させるために、6つの役割に分けたエージェントと「コードが決める」制御の仕組みを解説します。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>このページだけで読めるよう前提を補います。本エージェントは Ollama（ローカルでLLMを動かす実行環境）上の <code>gpt-oss</code>（会話・ツール実行担当）と <code>qwen3</code>（判断・分類担当）を使い分けます。全体は LangGraph（処理を「ノード」と「エッジ」のグラフで記述するフレームワーク）で組まれています。アーキテクチャ全体像は<a href="02-architecture.html">システムアーキテクチャ</a>を参照してください。</p></div></aside>
+
+<h2>なぜマルチエージェントなのか</h2>
+<p>1つのLLMに「最初から最後まで全部やって」と丸投げすると、短い質問なら問題なく答えられますが、複数の手順を要する長いタスクでは途中で目的を見失ったり、同じツール呼び出しを延々と繰り返して終わらなくなったりします。ローカルで動かせるサイズのモデルは、特にこの「迷子」が起きやすいという弱点があります。</p>
+<p>そこでこのプロジェクトでは、仕事を <strong>役割ごとの小さなエージェント（ノード）に分割</strong> し、さらに <strong>「次に何をするか」「もう終わってよいか」という制御の判断をLLMではなくコード側に持たせる</strong> という設計を採っています。LLMには「考える」ことだけを任せ、「進める・止める・戻る」の交通整理は決定論的なPythonの純関数（同じ入力なら必ず同じ結果を返す関数）が担当します。これにより、LLMの出力がどれだけ崩れても、有限のステップで必ず回答にたどり着く（停止性が保証される）構造になっています。</p>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">設計の合言葉</p><p>「賢さはLLMに、確実さはコードに。」ルーティング・ループ・終了判定は <code>routing.py</code> の純関数が決め、各ノードは失敗しても必ず正常な値を返す（例外を漏らさない）よう作られています。</p></div></aside>
+
+<h2>グラフの全体像</h2>
+<p>処理の入口は <code>START</code> で、そこから必ず <strong>orchestrator（オーケストレーター）</strong> に入ります。orchestrator はユーザーの要求を見て、2つの道のどちらに進むかを振り分けます。短い質問なら <strong>高速パス</strong>（responder が即答）へ、複数手順が必要そうなら <strong>計画パス</strong>（planner → executor → evaluator のループ）へ進みます。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  START(["START"]) --> ORC["orchestrator<br/>(qwen3: 分類)"]
+  ORC -->|"route = direct"| RES["responder<br/>(gpt-oss: 即答ReAct)"]
+  ORC -->|"route = plan"| PLN["planner<br/>(qwen3: 計画作成)"]
+  RES --> END1(["END"])
+  PLN --> EXE["executor<br/>(gpt-oss: 1ステップ実行)"]
+  EXE --> EVA["evaluator<br/>(qwen3: 合否判定)"]
+  EVA -->|"retry / 次ステップ"| EXE
+  EVA -->|"replan"| PLN
+  EVA -->|"全ステップ完了"| SYN["synthesizer<br/>(gpt-oss: 結果統合)"]
+  SYN --> END2(["END"])
+</pre><figcaption>図1: マルチエージェントグラフの全体像。実線の矢印はコード側（routing.py の純関数）が決定論的に選ぶ条件付きエッジ。</figcaption></figure>
+
+<p>図のうち、矢印の分岐（条件付きエッジ）はすべて <code>routing.py</code> の関数が決めます。<code>graph.py</code> では <code>add_conditional_edges</code> で「orchestrator の後は <code>route_after_orchestrator</code>」「evaluator の後は <code>route_after_evaluation</code>」と紐づけており、ここにLLMは一切登場しません。</p>
+
+<h2>6つのノードの役割</h2>
+<p>各ノードは <code>graph.py</code> の <code>build_agent()</code> 内で生成され、それぞれ得意なモデルを割り当てられています。<code>gpt-oss</code> は会話とツール実行に強いモデル、<code>qwen3</code> は短い判断（分類・計画・評価）を任せるモデルです。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>ノード</th><th>モデル</th><th>役割</th></tr></thead>
+<tbody>
+<tr><td>orchestrator</td><td>qwen3（control）</td><td>ターン開始時にスクラッチ（後述）をリセットし、要求を <code>DIRECT</code>（高速パス）か <code>PLAN</code>（計画パス）かに分類する。短い入力はLLMを呼ばず即 direct。</td></tr>
+<tr><td>responder</td><td>gpt-oss（chat）</td><td>高速パス担当。全ツール＋LangMem（長期記憶）＋全会話履歴を使う ReAct（考える→ツールを使う→また考える、を繰り返す方式）エージェント。単一エージェント時代と同じ即答役。</td></tr>
+<tr><td>planner</td><td>qwen3（control）</td><td>ゴールを実行可能なステップの列に分解し、JSON で返す。全履歴は渡さず、ゴールとツールカタログだけを見る。</td></tr>
+<tr><td>executor</td><td>gpt-oss（chat）</td><td>「今のステップ」だけをツール付き ReAct で実行する。毎ステップ新しいスクラッチパッドで動き、会話スレッドには永続化しない（<code>checkpointer=False</code>）。</td></tr>
+<tr><td>evaluator</td><td>qwen3（control）</td><td>ステップの実行結果を見て <code>pass</code> / <code>retry</code> / <code>replan</code> を判定し、リトライ・再計画の予算管理（上限超過時の格下げ）も行う。</td></tr>
+<tr><td>synthesizer</td><td>gpt-oss（chat）</td><td>全ステップの結果を統合して最終回答（<code>AIMessage</code>）を作る。失敗時は結果を機械的に連結して必ず何か返す。</td></tr>
+</tbody>
+</table></div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">「responder」がいるのに6つ？</p><p>ブリーフでは orchestrator / planner / executor / evaluator / synthesizer / responder の6ノード構成と説明しています。responder は高速パス専用の即答エージェントで、計画パスの executor とはツール・履歴の扱いが異なります（responder は全履歴あり、executor は履歴なし）。</p></div></aside>
+
+<h2>1ターンの流れ（計画パス）</h2>
+<p>複数手順が必要な要求の場合、planner が計画を立て、executor が1ステップずつ実行し、evaluator が毎回その出来を判定します。合格すれば次のステップへ、ダメなら同じステップをやり直し、計画自体が悪ければ planner に戻って立て直します。すべてのステップを終えると synthesizer が結果をまとめます。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor U as "ユーザー"
+  participant O as "orchestrator"
+  participant P as "planner"
+  participant E as "executor"
+  participant V as "evaluator"
+  participant S as "synthesizer"
+  U->>O: 複数手順が必要な要求
+  O->>O: fresh_scratch() で初期化<br/>分類 → route = plan
+  O->>P: 計画作成を依頼
+  P->>P: ゴールをステップ列に分解 (JSON)
+  loop 各ステップ
+    P-->>E: current_step を実行
+    E->>E: ツール付き ReAct で実行<br/>結果を step.result に保存
+    E->>V: 結果を渡す
+    alt pass
+      V->>V: current_step を +1
+    else retry
+      V-->>E: 同じステップを再実行
+    else replan
+      V-->>P: 計画を立て直し
+    end
+  end
+  V->>S: 全ステップ完了
+  S->>U: 結果を統合した最終回答
+</pre><figcaption>図2: 計画パス（route = plan）の1ターンの流れ。executor と evaluator がループを形成する。</figcaption></figure>
+
+<p>重要なのは、executor は <strong>毎ステップ「まっさらなスクラッチパッド」で動く</strong> 点です。<code>graph.py</code> で <code>checkpointer=False</code> として作られているため、前のステップのツール往復のログを引きずらず、与えられたのは「最終目標」「これまでのステップ結果の要約」「今回のタスク」だけ。これによりコンテキストが膨らみすぎず、各ステップに集中できます（詳しくは後述の状態管理を参照）。</p>
+
+<h2>高速パス（DIRECT）</h2>
+<p>「こんにちは」「ありがとう」のような短い挨拶や、ひとことで答えられる質問にまで計画を立てるのは無駄です。orchestrator はそうした入力を <code>direct</code> と分類し、responder に即答させます。さらに <code>router_skip_under_chars</code> 文字未満の極端に短い入力は、LLMでの分類すらスキップして即 direct とし、レイテンシ（応答までの待ち時間）をゼロに近づけます。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor U as "ユーザー"
+  participant O as "orchestrator"
+  participant R as "responder"
+  U->>O: 短い質問・挨拶
+  O->>O: fresh_scratch()<br/>短すぎる入力は LLM を呼ばず direct
+  O->>R: route = direct
+  R->>R: 全ツール + 全履歴 + LangMem で ReAct
+  R->>U: 即答 (AIMessage)
+</pre><figcaption>図3: 高速パス（route = direct）。orchestrator から responder へ直行し END に至る。</figcaption></figure>
+
+<p>responder は単一エージェント時代と同じ ReAct エージェントそのもので、親グラフと <code>messages</code> チャネル（会話履歴の入れ物）を共有し、checkpointer も親から継承します。つまり高速パスは「マルチエージェント以前の、シンプルな1エージェント挙動」へ安全に縮退した状態とも言えます。</p>
+
+<h2>評価ループと終了保証</h2>
+<p>計画パスのループが暴走しないよう、evaluator の判定（verdict）と <code>routing.py</code> の純関数が二人三脚で「必ず止まる」ことを保証します。verdict には4種類あります。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>verdict</th><th>意味</th><th>次の行き先</th></tr></thead>
+<tbody>
+<tr><td><code>pass</code></td><td>ステップ成功。<code>current_step</code> を1つ進める</td><td>次のステップ（executor）／全部終われば synthesizer</td></tr>
+<tr><td><code>retry</code></td><td>結果が不十分。同じステップをやり直す</td><td>executor（再実行）</td></tr>
+<tr><td><code>replan</code></td><td>計画自体が筋悪。立て直す</td><td>planner（再計画）</td></tr>
+<tr><td><code>fail</code></td><td>予算超過などで諦め、未完了として前進</td><td>次のステップ／synthesizer</td></tr>
+</tbody>
+</table></div>
+
+<figure class="figure"><pre class="mermaid">
+stateDiagram-v2
+  [*] --> Executing: "ステップ実行"
+  Executing --> Evaluating: "結果を判定"
+  Evaluating --> Executing: "retry (attempts <= max_step_retries)"
+  Evaluating --> Replanning: "replan (replan_count < max_replans)"
+  Replanning --> Executing: "新しい計画で再実行"
+  Evaluating --> Executing: "pass かつ 残りステップあり"
+  Evaluating --> Synthesizing: "pass かつ 全ステップ完了"
+  Evaluating --> Failing: "retry/replan の予算超過 → fail に格下げ"
+  Failing --> Executing: "未完了のまま次ステップへ"
+  Failing --> Synthesizing: "残りステップなし"
+  Executing --> Synthesizing: "executor_runs >= max_executor_runs (大域上限)"
+  Synthesizing --> [*]
+</pre><figcaption>図4: verdict による状態遷移。どの経路をたどっても必ず Synthesizing（または高速パスの END）に収束する。</figcaption></figure>
+
+<p>停止性（いつか必ず終わること）は、次の多層の安全装置で保証されています。</p>
+<ul>
+<li><strong>大域上限が最優先</strong>: executor を通過するたびに <code>executor_runs</code> が1ずつ増えます。<code>route_after_evaluation</code> は他のどの判定よりも先にこれを見て、<code>max_executor_runs</code> に達したら verdict が何であろうと無条件に synthesizer へ抜けます。</li>
+<li><strong>retry の上限</strong>: 同じステップの試行回数 <code>attempts</code> が <code>max_step_retries</code> を超えたら、evaluator が verdict を <code>fail</code> に格下げします。</li>
+<li><strong>replan の上限</strong>: <code>replan_count</code> が <code>max_replans</code> 以上なら、同じく <code>fail</code> に格下げします。</li>
+<li><strong>親グラフの recursion_limit</strong>: さらに保険として、LangGraph の親グラフ全体に <code>graph_recursion_limit</code> が設定されています（<code>streaming.py</code> で渡され、<code>config.py</code> が予算から下限を自動補正）。executor 内の ReAct にも <code>executor_recursion_limit</code> という別の上限があります。</li>
+</ul>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">予算管理はノード、ルーティングは純関数</p><p>「retry/replan を fail に格下げする」判断は evaluator ノード側で行い、<code>routing.py</code> の純関数には書きません。これにより routing.py は「verdict を見て行き先を返すだけ」の単純な純関数を保てます。役割分担を崩さないことが、デバッグしやすさと停止性の両立につながっています。</p></div></aside>
+
+<h2>モデル非依存の堅牢化（フォールバック）</h2>
+<p>ローカルLLMは構造化出力（決まった形のJSONを必ず返す機能）が不安定です。そこでこのプロジェクトでは <code>with_structured_output</code> のような仕組みを使わず、LLMにはプレーンテキストで答えさせ、そこから <code>parsing.py</code> がJSONを力技で抽出します。さらに各ノードは「パースに失敗しても必ず妥当な値を返す」フォールバックを持ちます。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>ノード</th><th>失敗時のフォールバック</th></tr></thead>
+<tbody>
+<tr><td>orchestrator</td><td>分類に失敗・例外なら <code>direct</code>（高速パス＝既存の単一エージェント挙動へ縮退）</td></tr>
+<tr><td>planner</td><td>計画のパース全滅なら単一ステップ計画 <code>[goal]</code> に縮退（executor 1回の ReAct 実行になる）</td></tr>
+<tr><td>executor</td><td>例外・反復上限なら打ち切りマーカー付きの結果文字列を返して正常リターン（例外を漏らさない）</td></tr>
+<tr><td>evaluator</td><td>空結果・打ち切りはLLMを呼ばず即 <code>retry</code>。パース全滅・例外なら <code>pass</code>（前進フォールバック）</td></tr>
+<tr><td>synthesizer</td><td>LLM失敗・空出力ならステップ結果を機械的に連結して回答（回答ゼロで終わらない）</td></tr>
+</tbody>
+</table></div>
+
+<p><code>parsing.py</code> のJSON抽出 <code>extract_json()</code> は、3段構えで頑強です。</p>
+<ol class="steps">
+<li><strong>&lt;think&gt; の除去</strong>: qwen3 などが出す <code>&lt;think&gt;...&lt;/think&gt;</code> という思考ブロックを取り除く（<code>strip_think</code>）。</li>
+<li><strong>コードフェンス優先</strong>: <code>```json ... ```</code> のようなコードブロックの中身を最優先で候補にする。</li>
+<li><strong>raw_decode 走査</strong>: それでも見つからなければ、テキスト中のすべての <code>{</code> の位置から <code>json.JSONDecoder().raw_decode</code> を試し、最初に成功した辞書を返す。全滅なら <code>None</code>。</li>
+</ol>
+<p>抽出後は pydantic（データ検証ライブラリ）の <code>PlanSchema</code> / <code>VerdictSchema</code> で型検証します。<code>PlanSchema</code> は <code>steps</code> が文字列のリストでも、<code>description</code>/<code>step</code>/<code>task</code>/<code>content</code> キーを持つ辞書のリストでも拾えるよう柔軟に作られています。さらに <code>parse_with_retry()</code> が「不正なJSONでした、形式だけ出してください」と指示を追記して最大 <code>max_retries</code> 回まで再試行し、それでもダメなら必ず <code>fallback</code> を返します。<strong>パースは「絶対に例外を投げない」契約</strong> です。</p>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">構造化出力を使わない理由</p><p><code>trustcall</code> や <code>with_structured_output</code> はローカルLLMでは不安定で、失敗すると例外が外まで漏れてエージェント全体が止まりかねません。「壊れにくいプレーンテキスト出力＋堅牢な抽出＋リトライ＋フォールバック」の方が、モデルの素性に依存せず確実に完走できます。</p></div></aside>
+
+<h2>状態（state）とコンテキスト管理</h2>
+<p>グラフ全体で持ち回るデータは <code>state.py</code> の <code>AgentGraphState</code> に定義されています。ここで一番大事な原則は、<strong>意味的に永続するのは <code>messages</code>（会話履歴）だけ</strong> という点です。計画や進捗（<code>plan</code> / <code>current_step</code> / <code>executor_runs</code> など）は「ターン内スクラッチ」、つまりその1ターン限りの作業メモで、orchestrator が毎ターン <code>fresh_scratch()</code> で必ず初期化します。これにより、前ターンのチェックポイント（DBに保存された途中状態）に残った古い値が悪さをしないよう、決定論的に上書きされます。</p>
+
+<figure class="figure"><pre class="mermaid">
+erDiagram
+  AgentGraphState ||--o{ PlanStep : "plan"
+  AgentGraphState {
+    list messages "永続 (履歴・LangMem と互換)"
+    Route route "direct or plan (毎ターン リセット)"
+    str goal "今ターンのユーザー要求"
+    int current_step "進行中のステップ番号"
+    int executor_runs "大域停止カウンタ"
+    int replan_count "再計画回数"
+    dict evaluation "verdict と feedback"
+    list failure_notes "諦めたステップの記録"
+  }
+  PlanStep {
+    int id "ステップ番号"
+    str description "実行タスク (自然文)"
+    str status "pending/running/done/failed"
+    str result "結果要約 (切詰め済み)"
+    int attempts "このステップの実行回数"
+  }
+</pre><figcaption>図5: AgentGraphState とその中の PlanStep の構造。messages 以外はすべてターン内スクラッチ。</figcaption></figure>
+
+<p>制御フィールドはすべて <code>NotRequired</code>（あってもなくてもよい）で宣言されています。これは、単一エージェント時代の <code>{"messages": [...]}</code> だけの古いチェックポイントもそのまま読めるようにするための後方互換の工夫です。</p>
+
+<p>各ノードが「どこまでの情報を見るか」も注意深く絞られています。これがコンテキスト管理の肝です。</p>
+<ul>
+<li><strong>responder のみ全履歴を見る</strong>: 高速パスの即答役だけが、過去の会話すべてを参照します。</li>
+<li><strong>planner / evaluator はゴールと結果要約のみ</strong>: 全履歴は渡さず、ゴールやステップ結果の要約だけを見るので、判断がぶれにくく軽量です。</li>
+<li><strong>executor は毎ステップ約8K文字以内に切り詰め</strong>: <code>_scoped_prompt()</code> が「最終目標」「これまでの結果（直近優先で <code>executor_history_max_chars</code> の予算内に詰める）」「今回のタスク」だけを組み立てます。前ステップの retry 時には evaluator の指摘も添えられます。</li>
+</ul>
+
+<p>最後に <strong>user_id の貫通</strong> について。ユーザー識別子（v1 では固定値 <code>"default-user"</code>）は2つの経路で同時に渡されます。<code>streaming.py</code> でグラフを呼ぶ際、<code>context=AgentContext(user_id=user_id)</code> として <code>@dataclass</code> のコンテキストを渡すと同時に、<code>configurable</code> にも <code>langgraph_user_id</code> を入れます。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">なぜ user_id を「二重に」渡すのか</p><p>LangMem の記憶を保存する名前空間（namespace）が <code>("memories", "{langgraph_user_id}")</code> と定義されており、この <code>{langgraph_user_id}</code> プレースホルダは <code>config.configurable</code> から解決されます。一方、ツールやプロンプトから参照する <code>user_id</code> は <code>AgentContext</code> 経由です。両方をそろえて渡さないと記憶のユーザー分離が崩れるため、<strong>context と configurable の双方にプラミング</strong>しています。記憶の仕組みは<a href="04-memory.html">記憶アーキテクチャ</a>、データの永続化は<a href="08-data-model.html">データモデルと永続化</a>を参照してください。</p></div></aside>
+
+<h2>関連ページ</h2>
+<ul>
+<li><a href="02-architecture.html">システムアーキテクチャ</a> — グラフが置かれる全体の構成</li>
+<li><a href="04-memory.html">記憶アーキテクチャ</a> — LangMem と long-term store</li>
+<li><a href="05-streaming.html">ストリーミング設計</a> — 各ノードの status を SSE で配信する仕組み</li>
+<li><a href="06-extensibility.html">拡張ガイド</a> — コア無改修でツール／MCP を足す方法</li>
+<li><a href="07-api-reference.html">APIリファレンス</a> — エージェントを呼ぶエンドポイント</li>
+</ul>
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>
