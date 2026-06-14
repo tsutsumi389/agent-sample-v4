@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     max_plan_steps: int = Field(5, ge=1)  # 計画ステップ数上限 (超過切捨て)
     max_step_retries: int = Field(1, ge=0)  # 同一ステップの retry 上限
     max_replans: int = Field(1, ge=0)  # planner 再突入上限
-    max_executor_runs: int = Field(8, ge=1)  # 大域停止条件 (route_after_evaluation 先頭で判定)
+    max_executor_runs: int = Field(8, ge=1)  # 大域停止条件 (実行ステップ数の累計上限)
+    max_parallel_executors: int = Field(3, ge=1)  # 1ラウンドで同時実行する executor 数の上限
     executor_recursion_limit: int = Field(12, ge=2)  # executor サブグラフ内 ReAct 反復上限
     graph_recursion_limit: int = Field(80, ge=10)  # 親グラフ recursion_limit (二重防御)
     # コンテキスト管理 (num_ctx に収めるための切詰め)

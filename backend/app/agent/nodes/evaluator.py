@@ -1,10 +1,14 @@
-"""エヴァリュエーター: ステップ結果を判定し、retry / replan の予算管理を行う。
+"""エヴァリュエーター: 直近ラウンドで実行されたステップ群を並列に判定する。
 
+executor が status="running" にしたステップを asyncio.gather で並列評価し、それぞれに
+retry / replan の予算管理を適用する。
 - 空結果・打ち切りは LLM を呼ばず決定論的に retry / fail。
 - パース全滅・例外時は pass (前進フォールバック — 評価器が壊れても全体は完走する)。
 - retry / replan の予算超過はここで fail にダウングレードする (routing.py は純関数のまま)。
+- retry はステップを pending に戻し (次ラウンドで再実行)、step 専用 feedback を残す。
 """
 
+import asyncio
 import logging
 
 from langchain_core.runnables import RunnableConfig
@@ -21,74 +25,84 @@ logger = logging.getLogger(__name__)
 def make_evaluator_node(model, settings: Settings):
     async def evaluator_node(state: dict, config: RunnableConfig) -> dict:
         plan = [dict(s) for s in state.get("plan") or []]
-        idx = state.get("current_step", 0)
-        if idx >= len(plan):
-            # 防御: 評価対象なし → 前進 (route_after_evaluation が synthesizer へ抜く)
-            return {"evaluation": {"verdict": "pass", "feedback": ""}}
+        running = [i for i, s in enumerate(plan) if s.get("status") == "running"]
+        if not running:
+            # 防御: 評価対象なし → 何も変えず routing が plan 状態で前進判断する
+            return {}
 
-        step = plan[idx]
-        result = step.get("result") or ""
+        replan_budget_left = state.get("replan_count", 0) < settings.max_replans
 
-        # 決定論プレチェック (LLM スキップ)
-        if not result.strip() or result.startswith(EXECUTION_FAILED_MARKER):
-            verdict, feedback = (
-                "retry",
-                "前回の実行が失敗または空の結果でした。別のアプローチで再実行してください。",
-            )
-        else:
-            parsed = await parse_with_retry(
-                model,
-                [
-                    HumanMessage(
-                        content=EVALUATOR_PROMPT.format(
-                            step_description=step["description"],
-                            result=result,
-                        )
+        async def eval_one(idx: int) -> tuple[int, str, str]:
+            # 例外を漏らさない契約 (executor.run_one と対称)。gather は return_exceptions=False の
+            # ため、1件でも例外を出すと他コルーチンを巻き込んで node 全体が落ち、executor が
+            # running にしたステップ群が未確定のまま消える。想定外の例外も pass で前進させる。
+            step = plan[idx]
+            try:
+                result = step.get("result") or ""
+                # 決定論プレチェック (LLM スキップ)
+                if not result.strip() or result.startswith(EXECUTION_FAILED_MARKER):
+                    verdict, feedback = (
+                        "retry",
+                        "前回の実行が失敗または空の結果でした。別のアプローチで再実行してください。",
                     )
-                ],
-                VerdictSchema,
-                fallback=VerdictSchema(verdict="pass", feedback=""),
-            )
-            verdict, feedback = parsed.verdict, parsed.feedback
+                else:
+                    parsed = await parse_with_retry(
+                        model,
+                        [
+                            HumanMessage(
+                                content=EVALUATOR_PROMPT.format(
+                                    step_description=step["description"],
+                                    result=result,
+                                )
+                            )
+                        ],
+                        VerdictSchema,
+                        fallback=VerdictSchema(verdict="pass", feedback=""),
+                    )
+                    verdict, feedback = parsed.verdict, parsed.feedback
+                # 予算ダウングレード (決定論コード — 停止性の保証)
+                if verdict == "retry" and step.get("attempts", 0) > settings.max_step_retries:
+                    verdict = "fail"
+                if verdict == "replan" and not replan_budget_left:
+                    verdict = "fail"
+                return idx, verdict, feedback
+            except Exception:
+                logger.exception("ステップ評価に失敗したため pass で前進します (step=%s)", step.get("id"))
+                return idx, "pass", ""
 
-        # 予算ダウングレード (決定論コード — 停止性の保証)
-        if verdict == "retry" and step.get("attempts", 0) > settings.max_step_retries:
-            verdict = "fail"
-        if verdict == "replan" and state.get("replan_count", 0) >= settings.max_replans:
-            verdict = "fail"
+        verdicts = await asyncio.gather(*(eval_one(i) for i in running))
 
         failure_notes = list(state.get("failure_notes") or [])
-        note = f"ステップ{idx + 1}「{step['description'][:100]}」: {feedback[:200] or '達成できませんでした'}"
-        updates: dict
-        if verdict == "pass":
-            step["status"] = "done"
-            plan[idx] = step
-            updates = {"plan": plan, "current_step": idx + 1, "evaluator_feedback": ""}
-        elif verdict == "retry":
-            updates = {"evaluator_feedback": feedback[: settings.feedback_max_chars]}
-        elif verdict == "replan":
-            failure_notes.append(note)
-            updates = {"failure_notes": failure_notes}
-        else:  # fail: ステップを諦めて前進
-            step["status"] = "failed"
-            plan[idx] = step
-            failure_notes.append(note)
-            updates = {
-                "plan": plan,
-                "current_step": idx + 1,
-                "failure_notes": failure_notes,
-                "evaluator_feedback": "",
-            }
-        updates["evaluation"] = {"verdict": verdict, "feedback": feedback}
-
+        needs_replan = bool(state.get("needs_replan"))
         writer = safe_stream_writer()
-        writer(
-            {
-                "status": f"ステップ {idx + 1} を評価: {verdict}",
-                "phase": "evaluate",
-                "verdict": verdict,
-            }
-        )
-        return updates
+
+        def _note(step: dict, feedback: str) -> str:
+            desc = (step.get("description") or "")[:100]
+            return f"ステップ{step.get('id')}「{desc}」: {feedback[:200] or '達成できませんでした'}"
+
+        for idx, verdict, feedback in verdicts:
+            step = plan[idx]
+            if verdict == "pass":
+                step["status"] = "done"
+                step["feedback"] = ""
+            elif verdict == "retry":
+                step["status"] = "pending"  # 次ラウンドで再実行 (依存は既に done)
+                step["feedback"] = feedback[: settings.feedback_max_chars]
+            elif verdict == "replan":
+                needs_replan = True
+                failure_notes.append(_note(step, feedback))  # status は running (再計画で置換)
+            else:  # fail: ステップを諦めて前進
+                step["status"] = "failed"
+                failure_notes.append(_note(step, feedback))
+            writer(
+                {
+                    "status": f"ステップ {step['id']} を評価: {verdict}",
+                    "phase": "evaluate",
+                    "step": step["id"],
+                    "verdict": verdict,
+                }
+            )
+
+        return {"plan": plan, "failure_notes": failure_notes, "needs_replan": needs_replan}
 
     return evaluator_node

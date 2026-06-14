@@ -10,7 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 
-from app.agent.nodes.common import safe_stream_writer
+from app.agent.nodes.common import safe_stream_writer, sanitize_dependencies
 from app.agent.parsing import PlanSchema, parse_with_retry
 from app.agent.prompts import PLANNER_PROMPT, PLANNER_REPLAN_SECTION
 from app.agent.state import PlanStep
@@ -44,14 +44,12 @@ def make_planner_node(model, tools: list[BaseTool], settings: Settings):
                 )
                 or "(なし)"
             )
+            # 評価者の retry/replan feedback は failure_notes に「ステップ名: 指摘」として
+            # 取り込まれているため、replan の理由はここに一本化する。
             notes = " / ".join(state.get("failure_notes") or []) or "(なし)"
-            feedback = ((state.get("evaluation") or {}).get("feedback") or "")[
-                : settings.feedback_max_chars
-            ]
             replan_section = PLANNER_REPLAN_SECTION.format(
                 done_summaries=done[:_REPLAN_SUMMARY_MAX],
                 failure_notes=notes[:_REPLAN_SUMMARY_MAX],
-                feedback=feedback,
             )
 
         writer({"status": "実行計画を作成中", "phase": "plan"})
@@ -67,24 +65,60 @@ def make_planner_node(model, tools: list[BaseTool], settings: Settings):
             PlanSchema,
             fallback=PlanSchema(steps=[]),
         )
-        steps = [s for s in parsed.steps if s.strip()][: settings.max_plan_steps]
-        if not steps:
-            # 最終フォールバック: 単一ステップ計画 (executor 1回の単一 ReAct 実行に縮退)
-            steps = [goal or "ユーザーの要求に回答する"]
-            logger.warning("計画の生成に失敗したため単一ステップ計画に縮退します")
+        # 空 description を除いた生存ステップに、LLM の元 id (無ければ間引き前の出現位置) を
+        # キーとして付ける。これを基準に depends_on をリマップするため、間引き前の位置で振る。
+        survivors: list[tuple[int, str, list[int]]] = []
+        for pos, s in enumerate(parsed.steps, start=1):
+            desc = s.description.strip()
+            if not desc:
+                continue
+            old_key = s.id if s.id is not None else pos
+            survivors.append((old_key, desc, s.depends_on))
+        survivors = survivors[: settings.max_plan_steps]
 
-        plan: list[PlanStep] = [
-            {"id": i + 1, "description": desc, "status": "pending", "result": "", "attempts": 0}
-            for i, desc in enumerate(steps)
-        ]
+        if not survivors:
+            # 最終フォールバック: 単一ステップ計画 (executor 1回の単一 ReAct 実行に縮退)
+            plan: list[PlanStep] = [
+                {
+                    "id": 1,
+                    "description": goal or "ユーザーの要求に回答する",
+                    "depends_on": [],
+                    "status": "pending",
+                    "result": "",
+                    "attempts": 0,
+                    "feedback": "",
+                }
+            ]
+            logger.warning("計画の生成に失敗したため単一ステップ計画に縮退します")
+        else:
+            # 元 id → 出現順 1..N へリマップ。これにより LLM が 0始まり/飛び番 id を出しても、
+            # 間引き・max_steps 切捨てがあっても depends_on の参照が壊れない。生存ステップ外
+            # (間引かれた/範囲外) を指す依存は除去する。重複 id は後勝ち (sanitize が最終防御)。
+            remap = {old_key: i + 1 for i, (old_key, _, _) in enumerate(survivors)}
+            plan = [
+                {
+                    "id": i + 1,
+                    "description": desc,
+                    "depends_on": [remap[d] for d in deps if d in remap],
+                    "status": "pending",
+                    "result": "",
+                    "attempts": 0,
+                    "feedback": "",
+                }
+                for i, (_, desc, deps) in enumerate(survivors)
+            ]
+        sanitize_dependencies(plan)
         writer(
             {
                 "status": f"計画を作成しました ({len(plan)}ステップ)",
                 "phase": "plan",
-                "plan": [{"id": s["id"], "description": s["description"]} for s in plan],
+                "plan": [
+                    {"id": s["id"], "description": s["description"], "depends_on": s["depends_on"]}
+                    for s in plan
+                ],
             }
         )
-        updates: dict = {"plan": plan, "current_step": 0, "evaluator_feedback": ""}
+        updates: dict = {"plan": plan, "needs_replan": False}
         if is_replan:
             updates["replan_count"] = state.get("replan_count", 0) + 1
         return updates

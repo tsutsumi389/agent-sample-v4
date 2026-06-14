@@ -50,7 +50,20 @@ def test_plan_schema_coerces_dict_steps():
         PlanSchema,
     )
     assert parsed is not None
-    assert parsed.steps == ["調査する", "まとめる", "報告する"]
+    assert [s.description for s in parsed.steps] == ["調査する", "まとめる", "報告する"]
+
+
+def test_plan_schema_extracts_dependencies():
+    parsed = parse_json_as(
+        '{"steps": ['
+        '{"id": 1, "description": "A", "depends_on": []}, '
+        '{"description": "B", "deps": ["1"]}, '  # 別キー名 + 数字文字列も拾う
+        '{"description": "C", "depends_on": [1, 2]}'
+        "]}",
+        PlanSchema,
+    )
+    assert parsed is not None
+    assert [s.depends_on for s in parsed.steps] == [[], [1], [1, 2]]
 
 
 def test_verdict_schema_rejects_unknown_verdict():
@@ -97,4 +110,4 @@ async def test_parse_with_retry_survives_model_exceptions():
         PlanSchema,
         fallback=lambda: PlanSchema(steps=["fallback"]),
     )
-    assert result.steps == ["fallback"]
+    assert [s.description for s in result.steps] == ["fallback"]

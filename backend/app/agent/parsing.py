@@ -22,22 +22,71 @@ FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 T = TypeVar("T", bound=BaseModel)
 
 
+def _coerce_opt_int(v: Any) -> int | None:
+    """単一の int 値の堅牢化: int/数字文字列のみ拾い、それ以外は None。"""
+    if isinstance(v, bool):  # bool は int サブクラスなので明示除外
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        return int(v.strip())
+    return None
+
+
+def _coerce_int_list(v: Any) -> list[int]:
+    """depends_on の堅牢化: int/数字文字列のみ拾い、それ以外は捨てる。"""
+    out: list[int] = []
+    for item in v if isinstance(v, list) else []:
+        coerced = _coerce_opt_int(item)
+        if coerced is not None:
+            out.append(coerced)
+    return out
+
+
+class PlanStepSchema(BaseModel):
+    # LLM が出した元 id (depends_on はこの id 空間で書かれる)。planner が出現順 1..N へ
+    # リマップする際の対応付けに使う。欠落・不正なら None (出現位置で代替)。
+    id: int | None = None
+    description: str
+    depends_on: list[int] = []
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def coerce_id(cls, v: Any) -> int | None:
+        return _coerce_opt_int(v)
+
+    @field_validator("depends_on", mode="before")
+    @classmethod
+    def coerce_depends_on(cls, v: Any) -> list[int]:
+        return _coerce_int_list(v)
+
+
 class PlanSchema(BaseModel):
-    steps: list[str]
+    steps: list[PlanStepSchema]
 
     @field_validator("steps", mode="before")
     @classmethod
-    def coerce(cls, v: Any) -> list[str]:
-        # list[dict] で来ても description/step/task/content キーを拾う。空要素は除去。
-        out: list[str] = []
+    def coerce(cls, v: Any) -> list[dict]:
+        # 旧形式 list[str] / 各種キー名 / 依存付き dict を一様な {description, depends_on} へ。
+        # depends_on / deps / after / requires / dependencies のいずれのキーでも依存を拾う。
+        out: list[dict] = []
         for item in v if isinstance(v, list) else []:
             if isinstance(item, str) and item.strip():
-                out.append(item.strip())
+                out.append({"id": None, "description": item.strip(), "depends_on": []})
             elif isinstance(item, dict):
+                desc = None
                 for k in ("description", "step", "task", "content"):
                     if isinstance(item.get(k), str) and item[k].strip():
-                        out.append(item[k].strip())
+                        desc = item[k].strip()
                         break
+                if desc is None:
+                    continue
+                deps: list = []
+                for dk in ("depends_on", "deps", "after", "requires", "dependencies"):
+                    if dk in item:
+                        deps = _coerce_int_list(item.get(dk))
+                        break
+                out.append({"id": item.get("id"), "description": desc, "depends_on": deps})
         return out
 
 
