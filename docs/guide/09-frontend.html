@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>フロントエンド設計 — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>フロントエンド設計</span></nav>
+<h1>フロントエンド設計</h1>
+<p class="lead">このページでは、React 19 + TypeScript + Vite で作られた画面の構成と、コンポーネントの親子関係・状態の持ち方・SSE（サーバーから少しずつ届くデータ）の受信処理を、実際のソースコードに沿って解説します。これを読めば「どのファイルが何を担当しているか」が一通り把握できます。</p>
+
+<p>前提として、このアプリは認証なしのシングルユーザー（user_id は固定値 <code>"default-user"</code>）で動くチャット型 AI エージェントです。フロントエンドはバックエンドの REST API と SSE エンドポイント（POST <code>/api/chat/stream</code>）だけを呼び出し、画面を組み立てます。API の詳細は <a href="07-api-reference.html">APIリファレンス</a>、ストリーミングの設計全体は <a href="05-streaming.html">ストリーミング設計</a> を参照してください。</p>
+
+<h2>画面構成（3ペイン）</h2>
+<p>画面は左から右へ 3 つの領域（ペイン）に分かれています。これは最上位コンポーネント <code>App</code> が <code>&lt;div className="app"&gt;</code> の中に 3 つのコンポーネントを横並びで配置することで作られています。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>ペイン</th><th>コンポーネント</th><th>役割</th></tr>
+</thead>
+<tbody>
+<tr><td>左</td><td><code>Sidebar</code></td><td>会話スレッドの一覧表示・新規作成・削除。クリックで表示するスレッドを切り替える。</td></tr>
+<tr><td>中央</td><td><code>ChatView</code></td><td>選択中スレッドの会話表示と、メッセージ送信・SSE 受信によるリアルタイム表示。</td></tr>
+<tr><td>右</td><td><code>MemoryPanel</code></td><td>AI が長期記憶として覚えている内容（メモリ）の一覧・検索・削除。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>「スレッド」とは 1 つの会話のまとまり（履歴を束ねる単位）です。スレッドを切り替えると、その会話の過去メッセージが中央ペインに読み込まれます。</p></div></aside>
+
+<h2>コンポーネント・ツリー</h2>
+<p>各コンポーネントの親子関係は次の図のとおりです。<code>App</code> を頂点に、3 つのペインがぶら下がります。中央の <code>ChatView</code> はさらに、1 件ずつのメッセージを描く <code>MessageBubble</code>（その中でツール実行を表示する <code>ToolCallChip</code> を使う）と、入力欄の <code>Composer</code> を子に持ちます。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  App["App<br/>(最上位・状態の親)"]
+  Sidebar["Sidebar<br/>スレッド一覧"]
+  ChatView["ChatView<br/>会話 + 送信 + SSE"]
+  MemoryPanel["MemoryPanel<br/>AIの記憶"]
+  MessageBubble["MessageBubble<br/>1件のメッセージ"]
+  ToolCallChip["ToolCallChip<br/>ツール呼び出し表示"]
+  Composer["Composer<br/>入力欄・送信ボタン"]
+
+  App --> Sidebar
+  App --> ChatView
+  App --> MemoryPanel
+  ChatView --> MessageBubble
+  ChatView --> Composer
+  MessageBubble --> ToolCallChip
+</pre><figcaption>図: コンポーネントの親子関係。App が 3 ペインを束ね、ChatView が会話の描画と入力を担う。</figcaption></figure>
+
+<p>ファイルの場所は <code>frontend/src/</code> 配下にまとまっています。最上位は <code>App.tsx</code>、画面部品は <code>components/</code>、状態ロジックは <code>hooks/</code>、API 通信は <code>api/</code> に分かれています。</p>
+
+<h2>状態管理とデータの流れ</h2>
+<p>このアプリは外部の状態管理ライブラリを使わず、React 標準の <code>useState</code> とカスタムフック（再利用できる状態ロジックの部品）だけで状態を持ちます。「どの状態を誰が持つか」を整理すると次のようになります。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>状態</th><th>持ち主</th><th>説明</th></tr>
+</thead>
+<tbody>
+<tr><td><code>activeThreadId</code></td><td><code>App</code></td><td>現在表示中のスレッド ID。<code>null</code> なら未選択。</td></tr>
+<tr><td><code>memoryRefreshKey</code></td><td><code>App</code></td><td>数値カウンタ。増えるたびに <code>MemoryPanel</code> が記憶を再取得する合図。</td></tr>
+<tr><td><code>threads</code> / <code>loading</code></td><td><code>useThreads</code></td><td>スレッド一覧と読み込み状態。CRUD（作成・取得・削除）操作もこのフックが提供。</td></tr>
+<tr><td><code>messages</code> / <code>progress</code> / <code>error</code></td><td><code>ChatView</code></td><td>表示中スレッドのメッセージ配列、進捗テキスト、エラー文言。</td></tr>
+<tr><td><code>streaming</code></td><td><code>useChatStream</code></td><td>SSE 受信中かどうか。送信・停止の関数もこのフックが返す。</td></tr>
+<tr><td><code>memories</code> / <code>query</code></td><td><code>MemoryPanel</code></td><td>記憶の一覧と検索キーワード。</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>状態は「上位の <code>App</code> が共有が必要なものだけを持ち、各ペインに props として渡す」設計です。たとえば「どのスレッドを開いているか」は <code>Sidebar</code>（一覧の選択表示）と <code>ChatView</code>（履歴の読み込み）の両方が必要なので、<code>App</code> が <code>activeThreadId</code> を持って両方に渡しています。</p>
+
+<h3>useThreads — スレッドの CRUD</h3>
+<p><code>useThreads(userId)</code> は <code>frontend/src/hooks/useThreads.ts</code> にあり、スレッド一覧の取得と作成・削除をまとめたフックです。返す値は次のとおりです。</p>
+<ul>
+<li><code>threads</code>: スレッド配列、<code>loading</code>: 読み込み中フラグ、<code>error</code>: エラー文言。</li>
+<li><code>refresh()</code>: 一覧を再取得する。</li>
+<li><code>create()</code>: 新規スレッドを作って一覧を更新し、作った <code>Thread</code> を返す。</li>
+<li><code>remove(threadId)</code>: スレッドを削除して一覧を更新する。</li>
+</ul>
+<p>マウント時（最初の表示時）に <code>useEffect</code> で <code>refresh()</code> を自動実行し、一覧を読み込みます。<code>create</code> と <code>remove</code> は内部で <code>refresh</code> を呼ぶため、操作後の一覧は常に最新になります。</p>
+
+<h3>api/client.ts と api/types.ts</h3>
+<p><code>api/client.ts</code> は <code>fetch</code> の薄いラッパです。共通関数 <code>request&lt;T&gt;</code> が「失敗時はレスポンスの <code>detail</code> を取り出して <code>Error</code> を投げ、成功時は JSON を返す」という処理を一手に引き受けます。各 API はこの関数を呼ぶだけの短い関数として並びます。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>関数</th><th>HTTP</th><th>用途</th></tr>
+</thead>
+<tbody>
+<tr><td><code>listThreads(userId)</code></td><td><span class="badge b-get">GET</span></td><td>スレッド一覧を取得</td></tr>
+<tr><td><code>createThread(userId, title?)</code></td><td><span class="badge b-post">POST</span></td><td>スレッドを新規作成</td></tr>
+<tr><td><code>getMessages(threadId, userId)</code></td><td><span class="badge b-get">GET</span></td><td>スレッドの履歴メッセージを取得</td></tr>
+<tr><td><code>deleteThread(threadId, userId)</code></td><td><span class="badge b-del">DELETE</span></td><td>スレッドを削除</td></tr>
+<tr><td><code>listMemories(userId, query?, limit)</code></td><td><span class="badge b-get">GET</span></td><td>記憶を一覧・検索（既定 limit=20）</td></tr>
+<tr><td><code>deleteMemory(key, userId)</code></td><td><span class="badge b-del">DELETE</span></td><td>記憶を 1 件削除</td></tr>
+<tr><td><code>listTools()</code></td><td><span class="badge b-get">GET</span></td><td>利用可能なツール一覧を取得</td></tr>
+</tbody>
+</table>
+</div>
+<p>すべての関数が <code>userId</code> をクエリパラメータやボディに含めており、user_id がフロント側から API まで一貫して流れる設計（設計4本柱の「user_id の貫通」）になっています。なお SSE の送信だけはこのラッパを通さず、後述の <code>useChatStream</code> が直接 <code>fetch</code> します。</p>
+<p><code>api/types.ts</code> は API 契約（<code>api_contract.md</code>）と対応する TypeScript の型定義です。<code>Thread</code> / <code>MessageOut</code> / <code>Memory</code> といったレスポンス型に加え、SSE で届く <code>TokenEvent</code> / <code>ToolCallEvent</code> / <code>ToolResultEvent</code> / <code>ProgressEvent</code> / <code>DoneEvent</code> / <code>ErrorEvent</code> や、送信ボディ <code>ChatStreamRequest</code> が定義されています。</p>
+
+<h2>送信からスレッド作成までの流れ</h2>
+<p>メッセージ送信は <code>ChatView</code> の <code>handleSend</code> が担います。ここで重要なのは「スレッド未選択でも送信できる」点です。その場合は先にスレッドを作ってから送信します。これはバックエンドの契約上、存在しない <code>thread_id</code> へ送ると 404 になるためです。</p>
+
+<ol class="steps">
+<li>送信中（<code>streaming</code>）または送信処理中なら何もしない（二重送信防止）。</li>
+<li><code>threadId</code> が <code>null</code> なら <code>createThread(userId)</code> でスレッドを作り、<code>onThreadCreated(thread)</code> で <code>App</code> に通知。<code>App</code> はその ID を <code>activeThreadId</code> にセットする。</li>
+<li>ローカルに「ユーザー発言」と「空のアシスタント発言」を即座に追加して、入力直後の体感速度を上げる。</li>
+<li><code>useChatStream</code> の <code>send()</code> を呼び、SSE 受信を開始する。</li>
+</ol>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">スレッド切替とストリームの取り違え防止</p><p>送信時に「ストリームを所有するスレッド ID」を <code>streamingThreadIdRef</code> に記録し、各イベントハンドラの先頭で <code>owns()</code>（今表示中のスレッドが所有者か）を確認しています。これにより、ストリーム中に別スレッドへ切り替えても、届いたトークンが別の会話に紛れ込まないようになっています。</p></div></aside>
+
+<h2>SSE 受信の流れ（useChatStream）</h2>
+<p><code>frontend/src/hooks/useChatStream.ts</code> は、SSE を <code>fetch</code> + <code>ReadableStream</code> で受信する手書きパーサです。ブラウザ標準の <code>EventSource</code> は GET 専用で POST やカスタムヘッダが使えないため、ここでは <code>fetch</code> でストリームを開き、自前で行を解析しています。次の図が一連の流れです。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor User as "利用者"
+  participant CV as "ChatView"
+  participant UC as "useChatStream.send"
+  participant API as "POST /api/chat/stream"
+  participant R as "ReadableStream reader"
+
+  User->>CV: メッセージ送信
+  CV->>UC: send(body, handlers)
+  UC->>API: fetch（Accept: text/event-stream）
+  API-->>UC: 200 + ストリーム本体
+  loop reader.read() が done になるまで
+    API-->>R: バイト列チャンク
+    R-->>UC: value（Uint8Array）
+    Note over UC: TextDecoder(stream:true) で<br/>UTF-8 を安全に結合
+    Note over UC: 改行で行分割し<br/>event:/data: を蓄積
+    UC->>CV: 空行で1イベント確定→ハンドラ呼出
+  end
+  Note over UC: done で確定 / error で停止
+</pre><figcaption>図: send() が fetch でストリームを開き、チャンクを行単位に分解してイベントをディスパッチするまで。</figcaption></figure>
+
+<p>パーサの内部処理を分解すると次のようになります。</p>
+<ul>
+<li><strong>UTF-8 の結合</strong>: <code>TextDecoder("utf-8")</code> を <code>{stream:true}</code> で使い、日本語などのマルチバイト文字がチャンク境界で分断されても正しく結合します。</li>
+<li><strong>行分割とフィールド解釈</strong>: バッファを <code>\n</code> で区切り、各行を <code>processLine</code> が解釈します。<code>event:</code> 行はイベント名、<code>data:</code> 行はデータ本文として蓄積。<code>:</code> で始まる行は keep-alive コメントとして無視し、<code>\r\n</code>（CRLF）にも対応します。</li>
+<li><strong>空行でディスパッチ</strong>: 空行を 1 イベントの区切りとみなし、<code>dispatch()</code> が蓄積した <code>data</code> 行を JSON としてパースし、イベント名に応じたハンドラへ渡します。</li>
+</ul>
+
+<p>イベント名ごとの扱いと、それを受けた <code>ChatView</code> 側の画面反映は次のとおりです。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>イベント</th><th>ハンドラ</th><th>画面での反映</th></tr>
+</thead>
+<tbody>
+<tr><td><code>token</code></td><td><code>onToken</code></td><td>アシスタント発言の <code>content</code> に文字を追記（少しずつ本文が伸びる）。</td></tr>
+<tr><td><code>tool_call</code></td><td><code>onToolCall</code></td><td>ツール呼び出しチップを追加（「実行中」表示）。</td></tr>
+<tr><td><code>tool_result</code></td><td><code>onToolResult</code></td><td>同じ <code>id</code> のチップに結果を入れる（「完了」表示）。</td></tr>
+<tr><td><code>progress</code></td><td><code>onProgress</code></td><td><code>progress</code> 状態を更新し、進捗テキストを表示。</td></tr>
+<tr><td><code>done</code></td><td><code>onDone</code></td><td>進捗をクリアし、<code>App</code> の <code>handleDone</code> へ。一覧更新と記憶再取得を起動。</td></tr>
+<tr><td><code>error</code></td><td><code>onError</code></td><td>進捗をクリアしエラー文言を表示。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">send は必ずイベントハンドラから呼ぶ</p><p>ソースのコメントにあるとおり、<code>send</code> を <code>useEffect</code> から呼んではいけません。React 19 の StrictMode は開発時に effect を二重実行するため、effect 起点だと送信が 2 回走ってしまいます。このアプリでは「送信ボタンのクリック」というユーザー操作を起点にしています。</p></div></aside>
+
+<p>停止は <code>stop()</code> が <code>AbortController</code> の <code>abort()</code> を呼ぶことで実現します。中断は <code>AbortError</code> として握りつぶされ、エラー扱いにはなりません。また送信中に <code>abortRef</code> が埋まっている間は <code>send</code> の再入を拒否し、二重ストリームを防ぎます。done で受け取った最終イベントの内容（<code>DoneEvent</code> = <code>thread_id</code> と <code>title</code>）をきっかけに、<code>App</code> がスレッド一覧を <code>refresh</code> し（タイトルが確定する）、<code>memoryRefreshKey</code> を増やして記憶パネルを再取得します。</p>
+
+<h2>会話の表示（MessageBubble と履歴の変換）</h2>
+<p><code>MessageBubble</code> は 1 件のメッセージを吹き出しで描きます。送信者（あなた / アシスタント）の表示、本文、そしてツール呼び出しがあればチップを並べます。ストリーミング中で本文がまだ空のときは「考え中...」、本文が出始めたら点滅カーソルを表示して、生成中であることを示します。</p>
+<p>履歴 API から取得したメッセージは、<code>ChatView</code> 内の <code>toUIMessages</code> が表示用モデル（<code>UIMessage</code>）へ変換します。ここでのポイントは、<code>role: "tool"</code> のメッセージ（ツールの実行結果）を独立した吹き出しにせず、対応する呼び出しに <code>tool_call_id</code> で突き合わせて、アシスタント発言の中のチップへ畳み込むことです。これにより「呼び出しと結果が 1 つのチップにまとまる」見た目になります。</p>
+
+<h2>ツール呼び出しの可視化（ToolCallChip）</h2>
+<p><code>ToolCallChip</code> は、AI がツール（外部機能）を使ったことを <code>&lt;details&gt;</code> の開閉ボックスで見せるコンポーネントです。要約部分にはツール名と状態バッジ（結果がまだなら「実行中」、届いたら「完了」）を表示し、開くと引数（JSON を整形表示）と結果が見られます。</p>
+<p>ストリーミング中は、先に <code>tool_call</code> が来てチップが「実行中」で現れ、後から <code>tool_result</code> が同じ <code>id</code> で届いて「完了」に変わる、という流れになります。ツール実行がイベントとしてどう流れてくるかは <a href="05-streaming.html">ストリーミング設計</a>、各ツールの API 仕様は <a href="07-api-reference.html">APIリファレンス</a> を参照してください。<span class="badge b-native">native</span> や <span class="badge b-mcp">MCP</span> といったツールの種別については <a href="06-extensibility.html">拡張ガイド</a> で扱います。</p>
+
+<h2>AI の記憶パネル（MemoryPanel）</h2>
+<p><code>MemoryPanel</code> は、AI が長期記憶として覚えている内容を一覧・検索・削除する右ペインです。<code>refreshKey</code> という props が増えるたびに <code>load()</code> を呼んで再取得します。<code>App</code> は会話の <code>done</code> ごとにこのキーを増やすため、会話のたびに記憶表示が更新されます。検索欄にキーワードを入れて検索すると、ベクトル検索のスコア（関連度）が各項目に表示されます。記憶の仕組みそのものは <a href="04-memory.html">記憶アーキテクチャ</a> を参照してください。</p>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">記憶は少し遅れて反映される</p><p>パネルにも注記があるとおり、会話内容が記憶に統合されるのはバックグラウンド処理で 30 秒ほどかかります。直近の発言がすぐ記憶に出てこなくても正常です。</p></div></aside>
+
+<h2>Vite 開発サーバと proxy</h2>
+<p>開発時はフロント（Vite、ポート 5173）とバックエンド（FastAPI、ポート 8000）が別ポートで動くため、ブラウザから直接 8000 番を叩くと CORS（別オリジンへのアクセス制限）に引っかかります。これを避けるため、<code>vite.config.ts</code> の <code>server.proxy</code> で <code>/api</code> へのリクエストをバックエンドへ中継しています。</p>
+<span class="code-label">frontend/vite.config.ts</span>
+<pre><code>export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
+  },
+});</code></pre>
+<p>この設定のおかげで、フロントのコードは常に <code>/api/...</code> という同一オリジン相対パスだけを書けばよく、開発環境の URL の違いを意識せずに済みます。実際 <code>api/client.ts</code> と <code>useChatStream.ts</code> はすべて <code>/api</code> 始まりのパスを使っています。開発サーバの起動手順は <a href="10-setup.html">セットアップと運用</a> を参照してください。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">user_id の決まり方</p><p><code>App.tsx</code> では <code>import.meta.env.VITE_USER_ID ?? "default-user"</code> で user_id を決めています。環境変数 <code>VITE_USER_ID</code> が無ければ既定値 <code>"default-user"</code> が使われ、v1 のシングルユーザー前提と一致します。</p></div></aside>
+
+<h2>まとめ</h2>
+<p>フロントエンドは、<code>App</code> が 3 ペインと共有状態を束ね、スレッド操作は <code>useThreads</code>、送信と SSE 受信は <code>useChatStream</code> という 2 つのフックに分離されたシンプルな構成です。SSE は標準 <code>EventSource</code> ではなく <code>fetch</code> + <code>ReadableStream</code> による手書きパーサで、POST・カスタムヘッダ・中断（停止ボタン）に対応します。関連する設計は <a href="05-streaming.html">ストリーミング設計</a>、<a href="07-api-reference.html">APIリファレンス</a>、<a href="04-memory.html">記憶アーキテクチャ</a> を合わせて読むと全体像がつかめます。</p>
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

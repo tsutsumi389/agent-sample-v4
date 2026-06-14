@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>システムアーキテクチャ — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>システムアーキテクチャ</span></nav>
+<h1>システムアーキテクチャ</h1>
+<p class="lead">このシステムが「どんな部品で」「どうつながって」動いているのか、そして「なぜこの構成を選んだのか」を、実際のソースコードに即して解説します。全体像をつかめば、以降の各ページ（マルチエージェント設計・記憶・ストリーミングなど）がぐっと読みやすくなります。</p>
+
+<p>このプロジェクトは、ローカルで動く LLM（大規模言語モデル＝文章を生成するAIの本体）である <strong>Ollama</strong> を頭脳に使う、チャット型の汎用AIエージェントです。認証はなく、v1 はシングルユーザー（利用者を識別する <code>user_id</code> は <code>"default-user"</code> 固定）で動きます。ここでは、画面（フロントエンド）・サーバー（バックエンド）・データベース・LLM の4つがどう協調するかを見ていきます。</p>
+
+<h2>全体構成（コンテナ図）</h2>
+<p>まずは「箱（プロセス）」のレベルで全体像を見ます。登場するのは4つの実行プロセスです。ブラウザの中で動く <strong>フロントエンド</strong>、Python で書かれた <strong>バックエンド</strong>、データを保存する <strong>PostgreSQL</strong>、そして AI 本体の <strong>Ollama</strong> です。フロントエンドとバックエンドは別々のポートで動くため、開発時はフロントの開発サーバー（Vite）が <code>/api</code> 宛のリクエストをバックエンドへ中継（プロキシ）します。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  subgraph Browser["ブラウザ"]
+    FE["フロントエンド<br/>React 19 + Vite (:5173)"]
+  end
+  subgraph Server["サーバー側プロセス"]
+    BE["バックエンド<br/>FastAPI + uvicorn (:8000)"]
+    PG[("PostgreSQL<br/>pgvector (:5432)")]
+    OL["Ollama<br/>LLM ランタイム (:11434)"]
+  end
+  FE -->|"/api を proxy<br/>(SSE で応答を受信)"| BE
+  BE -->|"会話履歴・長期記憶・<br/>ベクトル検索"| PG
+  BE -->|"gpt-oss / qwen3 /<br/>nomic-embed-text"| OL
+</pre><figcaption>図1: 4つのプロセスのつながり。フロントは <code>/api</code> をバックエンドへプロキシし、バックエンドが PostgreSQL と Ollama を束ねる。</figcaption></figure>
+
+<p>ポイントは、<strong>バックエンドが中心（ハブ）</strong>になっていることです。フロントエンドは PostgreSQL にも Ollama にも直接アクセスしません。すべての通信はバックエンドの <code>/api</code> を経由します。これにより、AI への問い合わせ方やデータの保存方法を変えても、フロントエンド側の修正を最小限にできます。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>ポート番号は、フロント開発サーバーが <code>5173</code>、バックエンドが <code>8000</code>、PostgreSQL が <code>5432</code>、Ollama が <code>11434</code> です。PostgreSQL は <code>docker-compose.yml</code> で <code>pgvector/pgvector:pg17</code> イメージを使って起動します（ベクトル検索のため、ただの PostgreSQL ではなく pgvector 入りが必須です）。</p></div></aside>
+
+<h2>バックエンドのディレクトリ構成</h2>
+<p>バックエンド（<code>backend/app/</code>）は、役割ごとにフォルダを分けています。「画面からのリクエストを受ける層」「AI の思考ロジック層」「裏方の処理層」がきれいに分かれているのが特徴です。次の図はフォルダの親子関係を表したものです。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  app["app/"]
+  app --> routers["routers/<br/>(HTTP の入口)"]
+  app --> agent["agent/<br/>(AI の思考エンジン)"]
+  app --> services["services/<br/>(裏方処理)"]
+  app --> memory["memory/<br/>(長期記憶)"]
+  app --> mcp["mcp/<br/>(外部ツール接続)"]
+  app --> tools["tools/<br/>(ネイティブツール群)"]
+  app --> core["core/<br/>(設定・DB)"]
+  app --> schemas["schemas/<br/>(入出力の型)"]
+  app --> main["main.py<br/>(起動の起点)"]
+
+  routers --> r1["chat / threads / memory<br/>health / tools"]
+  agent --> a1["graph / state / routing<br/>parsing / prompts / models / context"]
+  agent --> a2["nodes/<br/>orchestrator・planner<br/>executor・evaluator<br/>synthesizer・common"]
+  services --> s1["streaming / history / threads"]
+  memory --> m1["manager / tools / store_query"]
+  tools --> t1["registry +<br/>calculator・datetime<br/>web_search ..."]
+  core --> c1["config / db"]
+</pre><figcaption>図2: バックエンドのフォルダ構成。入口（routers）から思考（agent）、裏方（services / memory / tools）まで層が分かれている。</figcaption></figure>
+
+<p>各フォルダの役割は次の表のとおりです。実際のファイル名に対応しています。</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>フォルダ / ファイル</th><th>役割</th></tr></thead>
+<tbody>
+<tr><td><code>routers/</code></td><td>HTTP リクエストの入口。<code>chat.py</code>(チャット), <code>threads.py</code>(会話スレッド), <code>memory.py</code>(記憶), <code>health.py</code>(死活監視), <code>tools.py</code>(ツール一覧) の各エンドポイントを定義。</td></tr>
+<tr><td><code>agent/</code></td><td>AI の思考エンジン本体。<code>graph.py</code>(エージェント構築), <code>state.py</code>(状態), <code>routing.py</code>(分岐判断), <code>parsing.py</code>(出力解析), <code>prompts.py</code>(指示文), <code>models.py</code>(LLM 定義), <code>context.py</code>(文脈)。</td></tr>
+<tr><td><code>agent/nodes/</code></td><td>マルチエージェントを構成する各役割ノード。<code>orchestrator</code>・<code>planner</code>・<code>executor</code>・<code>evaluator</code>・<code>synthesizer</code> と共通処理 <code>common</code>。詳しくは <a href="03-multi-agent.html">マルチエージェント設計</a>。</td></tr>
+<tr><td><code>services/</code></td><td>裏方の処理。<code>streaming.py</code>(SSE 配信), <code>history.py</code>(会話履歴の取得), <code>threads.py</code>(スレッド操作)。</td></tr>
+<tr><td><code>memory/</code></td><td>長期記憶まわり。<code>manager.py</code>(記憶の抽出・反映), <code>tools.py</code>(LangMem のツール), <code>store_query.py</code>(記憶の検索)。<a href="04-memory.html">記憶アーキテクチャ</a>参照。</td></tr>
+<tr><td><code>mcp/</code></td><td><code>loader.py</code>。外部ツールサーバー（MCP）の設定を読み込み、ツールとして取り込む。<a href="06-extensibility.html">拡張ガイド</a>参照。</td></tr>
+<tr><td><code>tools/</code></td><td>エージェントに渡すネイティブツール群。<code>registry.py</code> が <code>calculator</code>・<code>datetime_tool</code>・<code>web_search</code> などの <code>@tool</code> を集める。</td></tr>
+<tr><td><code>core/</code></td><td>土台となる共通機能。<code>config.py</code>(設定), <code>db.py</code>(DB 接続プールと永続化)。</td></tr>
+<tr><td><code>schemas/</code></td><td>リクエスト・レスポンスの型（<code>chat.py</code> など）。入出力の形をはっきり決める。</td></tr>
+<tr><td><code>main.py</code></td><td>FastAPI アプリの起点。後述の <code>lifespan</code> で起動時の初期化をまとめて行う。</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>起動時に何が起きるか（lifespan）</h2>
+<p>FastAPI には <code>lifespan</code>（アプリの起動から終了までを管理する仕組み）があり、このプロジェクトは <code>main.py</code> の <code>lifespan</code> 関数で初期化処理を1か所に集約しています。サーバー起動時に一度だけ、DB 接続プールを作り、永続化レイヤを準備し、エージェントを組み立てます。順を追って見てみましょう。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor U as uvicorn
+  participant L as lifespan
+  participant DB as core.db
+  participant PG as PostgreSQL
+  participant AG as agent.graph
+  participant ST as app.state
+  U->>L: アプリ起動
+  L->>DB: build_pool(database_url)
+  DB-->>L: AsyncConnectionPool (未 open)
+  L->>L: await pool.open()
+  L->>DB: init_persistence(pool, settings)
+  DB->>PG: checkpointer.setup() / store.setup()
+  Note over DB,PG: テーブル作成は冪等 (一度だけ)
+  DB-->>L: (checkpointer, store)
+  L->>DB: ensure_threads_table(pool)
+  DB->>PG: CREATE TABLE IF NOT EXISTS threads
+  L->>AG: build_agent(tools, checkpointer, store)
+  AG-->>L: agent
+  L->>L: build_reflection_executor(store, settings)
+  L->>ST: pool / store / agent / reflection_executor を格納
+  Note over L,ST: yield で起動完了 → リクエスト受付開始
+</pre><figcaption>図3: 起動シーケンス。単一プールを作り、永続化を一度だけ setup し、エージェントを組み立てて <code>app.state</code> に格納する。</figcaption></figure>
+
+<p>実際のコード上の流れは次のとおりです。</p>
+<ol class="steps">
+<li><code>build_pool(settings.database_url)</code> で <strong>共有の接続プールを1つ</strong>作り、<code>await pool.open()</code> で開きます。</li>
+<li><code>init_persistence(pool, settings)</code> が、そのプールの上に <code>checkpointer</code>（会話履歴を DB に保存する仕組み）と <code>store</code>（長期記憶＋ベクトル検索の保管庫）を作り、それぞれ <code>setup()</code> を<strong>一度だけ</strong>実行してテーブルを用意します。</li>
+<li><code>ensure_threads_table(pool)</code> で、スレッドのメタ情報（タイトルや更新日時）を保存する <code>threads</code> テーブルを作ります。これはチェックポインタには含まれない独自テーブルです。</li>
+<li><code>build_registry()</code> でネイティブツールを集め、<code>langmem_hotpath_tools(store)</code> で記憶ツールを用意し、<code>get_mcp_tools()</code> で外部ツール（MCP）を取り込みます。</li>
+<li><code>build_agent(...)</code> で、上記すべてのツール・<code>checkpointer</code>・<code>store</code> を渡してエージェント本体を組み立てます。</li>
+<li><code>build_reflection_executor(store, settings)</code> で、会話の後に記憶を整理する <strong>ReflectionExecutor</strong> を用意します。</li>
+<li>これらを <code>app.state</code>（アプリ全体で共有できる置き場）に格納し、<code>yield</code> でリクエスト受付を開始します。</li>
+</ol>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">堅牢な後片付け</p><p><code>lifespan</code> は <code>try / finally</code> で囲まれており、起動が途中で失敗しても <code>finally</code> で必ず後片付けします。順序は「<code>reflection_executor.shutdown()</code> → <code>pool.close()</code>」で、バックグラウンド処理を止めてから接続プールを閉じます。</p></div></aside>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">テスト用の早期リターン</p><p>設定 <code>skip_startup</code>（環境変数 <code>APP_SKIP_STARTUP=1</code>）が真のときは、PostgreSQL・Ollama・MCP に接続せず、<code>pool</code> や <code>agent</code> を <code>None</code> にしたまま起動します。DB や LLM を用意できないテスト環境でアプリを立ち上げるための仕組みです。</p></div></aside>
+
+<h2>MCP ツール取得の失敗耐性</h2>
+<p>外部ツールサーバー（MCP）の読み込みは、失敗してもアプリ全体が落ちないように設計されています。<code>get_mcp_tools()</code> の呼び出しは <code>try / except</code> で囲まれており、例外が起きてもログを残してネイティブツールだけで処理を続行します。外部依存があってもエージェントの基本機能が止まらない、という安全設計です。</p>
+
+<h2>技術スタックと選定理由</h2>
+<p>採用している主な技術と、なぜそれを選んだのかを表にまとめます。設計の4本柱（拡張性・ストリーミング・<code>user_id</code> の貫通・シンプルさ）に沿った選定になっています。</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>領域</th><th>採用技術</th><th>選定理由</th></tr></thead>
+<tbody>
+<tr><td>言語・実行</td><td>Python 3.12 + uv</td><td>LLM 周辺ライブラリが充実。<code>uv</code> は高速なパッケージ／環境管理ツール。</td></tr>
+<tr><td>Web フレームワーク</td><td>FastAPI 0.136 + uvicorn</td><td>非同期に強く、<code>lifespan</code> で起動初期化を一元化できる。SSE をネイティブに返せる。</td></tr>
+<tr><td>エージェント基盤</td><td>LangGraph 1.x（<code>create_agent</code>）</td><td>ツール呼び出しと状態管理を備えたエージェントを宣言的に組み立てられる。</td></tr>
+<tr><td>ストリーミング</td><td>FastAPI ネイティブ SSE</td><td>追加ライブラリ不要。生成中のトークンを逐次返せる。<a href="05-streaming.html">ストリーミング設計</a>参照。</td></tr>
+<tr><td>LLM（チャット）</td><td>gpt-oss（Ollama）</td><td>チャット＋ツール呼び出し用。<code>num_ctx=32768</code>、<code>reasoning="medium"</code>。</td></tr>
+<tr><td>LLM（制御・記憶抽出）</td><td>qwen3（Ollama）</td><td>計画・判断・記憶抽出など構造化判断用。<code>num_ctx=8192</code> と軽量。</td></tr>
+<tr><td>埋め込み</td><td>nomic-embed-text（Ollama）</td><td>文章をベクトル化（768次元）。長期記憶の意味検索に使う。</td></tr>
+<tr><td>データベース</td><td>PostgreSQL + pgvector（pg17）</td><td>会話履歴・長期記憶・ベクトル検索を1つの DB で完結。pgvector が<strong>必須</strong>。</td></tr>
+<tr><td>会話履歴</td><td>AsyncPostgresSaver（checkpointer）</td><td>会話の途中状態を DB に保存し、再開できる。</td></tr>
+<tr><td>長期記憶</td><td>AsyncPostgresStore（+vector768）＋ LangMem</td><td>ユーザーごとの記憶を保存・検索。LangMem が抽出・反映を担う。</td></tr>
+<tr><td>外部ツール接続</td><td>langchain-mcp-adapters</td><td>MCP サーバーのツールをコア無改修で取り込める。</td></tr>
+<tr><td>フロントエンド</td><td>React 19 + TypeScript 5.9 + Vite 8</td><td>型安全な UI 開発と高速な開発サーバー。SSE は <code>fetch</code> + <code>ReadableStream</code> で受信。</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>設定（config）</h2>
+<p>設定は <code>app/core/config.py</code> の <code>Settings</code> クラスで管理しています。これは <strong>pydantic-settings</strong>（環境変数を型付きで読み込むライブラリ）を使っており、環境変数は <code>APP_</code> プレフィックスで指定します。値はリポジトリルートの <code>.env</code> から読み込まれます。<code>.env.example</code> にある主な設定は次のとおりです。</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>環境変数</th><th>既定値（.env.example）</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>APP_DATABASE_URL</code></td><td><code>postgresql://postgres:postgres@localhost:5432/agent</code></td><td>PostgreSQL の接続先。</td></tr>
+<tr><td><code>APP_OLLAMA_BASE_URL</code></td><td><code>http://localhost:11434</code></td><td>Ollama の接続先 URL。</td></tr>
+<tr><td><code>APP_CHAT_MODEL</code></td><td><code>gpt-oss</code></td><td>チャット応答に使う LLM。</td></tr>
+<tr><td><code>APP_MEMORY_MODEL</code></td><td><code>qwen3</code></td><td>記憶抽出（リフレクション）に使う LLM。</td></tr>
+<tr><td><code>APP_EMBED_MODEL</code></td><td><code>nomic-embed-text</code></td><td>埋め込み（ベクトル化）に使うモデル。</td></tr>
+<tr><td><code>APP_NUM_CTX</code></td><td><code>32768</code></td><td>チャット LLM のコンテキスト長（一度に扱えるトークン数）。</td></tr>
+<tr><td><code>APP_REASONING_EFFORT</code></td><td><code>medium</code></td><td>推論の深さの指定。</td></tr>
+<tr><td><code>APP_CORS_ORIGINS</code></td><td><code>["http://localhost:5173"]</code></td><td>フロントからのアクセスを許可するオリジン。</td></tr>
+<tr><td><code>APP_MCP_CONFIG_PATH</code></td><td><code>mcp_servers.json</code></td><td>MCP サーバー設定ファイルのパス。</td></tr>
+<tr><td><code>APP_REFLECTION_DELAY_SECONDS</code></td><td><code>30</code></td><td>会話後、記憶を整理するまでの待ち時間（秒）。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">マルチエージェント用の追加設定</p><p><code>config.py</code> には、上の基本設定に加えてマルチエージェントグラフ用の設定（<code>control_model</code>、計画ステップ上限 <code>max_plan_steps</code>、再計画上限 <code>max_replans</code>、親グラフの <code>graph_recursion_limit</code> など）も定義されています。これらは無限ループ防止やコンテキスト切り詰めのための値で、詳細は <a href="03-multi-agent.html">マルチエージェント設計</a>で扱います。</p></div></aside>
+
+<h2>DB 接続の方針</h2>
+<p>このシステムは、<code>checkpointer</code>・<code>store</code>・エージェントの3者が<strong>同じ1つの接続プールを共有</strong>します。プールごとに接続を持つのではなく、起動時に <code>build_pool()</code> で作った <code>AsyncConnectionPool</code> を全員で使い回す設計です。接続数を抑え、初期化も1か所にまとまるので、シンプルさという設計方針に合致します。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  POOL["AsyncConnectionPool<br/>(単一・共有)"]
+  CP["checkpointer<br/>AsyncPostgresSaver"]
+  STORE["store<br/>AsyncPostgresStore (+vector768)"]
+  AGENT["agent<br/>(create_agent)"]
+  POOL --> CP
+  POOL --> STORE
+  POOL --> AGENT
+  CP --> PG[("PostgreSQL")]
+  STORE --> PG
+  AGENT --> PG
+</pre><figcaption>図4: 1つの接続プールを <code>checkpointer</code> / <code>store</code> / agent が共有する。</figcaption></figure>
+
+<p>プールを作るときの接続オプション（<code>kwargs</code>）には、次の3つを必ず指定しています。これは LangGraph の Postgres 永続化が正しく動くための必須設定です。</p>
+
+<span class="code-label">backend/app/core/db.py</span>
+<pre><code>def build_pool(database_url: str) -&gt; AsyncConnectionPool:
+    """単一の共有 AsyncConnectionPool を作る (open は呼び出し側で await)。"""
+    return AsyncConnectionPool(
+        conninfo=database_url,
+        open=False,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )</code></pre>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>接続オプション</th><th>役割</th></tr></thead>
+<tbody>
+<tr><td><code>autocommit: True</code></td><td>各文を即座にコミット。LangGraph の Postgres セーバー／ストアが前提とする動作。</td></tr>
+<tr><td><code>prepare_threshold: 0</code></td><td>プリペアドステートメントの自動準備を無効化。プール越しの再利用で起きる不整合を防ぐ。</td></tr>
+<tr><td><code>row_factory: dict_row</code></td><td>クエリ結果を辞書（カラム名→値）で受け取る。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">落とし穴: from_conn_string は使わない</p><p>LangGraph のチュートリアルでよく出てくる <code>from_conn_string</code> は、内部で接続を開いて<strong>自動的に閉じてしまう</strong>ため、このプロジェクトでは使いません。接続が閉じられると、共有プールを使い回す前提が崩れてしまうからです。代わりに、自前で作った <code>AsyncConnectionPool</code> を <code>AsyncPostgresSaver(pool)</code> / <code>AsyncPostgresStore(pool, ...)</code> に渡し、ライフサイクルを <code>lifespan</code> 側で一元管理しています。上の <code>kwargs</code> 3点を欠かすと永続化が正しく動かないので、プール生成時に必ず指定してください。</p></div></aside>
+
+<h2>次に読むページ</h2>
+<p>全体像をつかんだら、興味に応じて次のページへ進んでください。</p>
+<ul>
+<li><a href="03-multi-agent.html">マルチエージェント設計</a> — <code>agent/nodes/</code> の各役割（orchestrator / planner / executor / evaluator / synthesizer）の連携。</li>
+<li><a href="04-memory.html">記憶アーキテクチャ</a> — <code>store</code> と LangMem による長期記憶の仕組み。</li>
+<li><a href="05-streaming.html">ストリーミング設計</a> — SSE で応答を逐次配信する流れ。</li>
+<li><a href="08-data-model.html">データモデルと永続化</a> — <code>threads</code> テーブルやチェックポイントの中身。</li>
+<li><a href="10-setup.html">セットアップと運用</a> — 実際に動かすための手順。</li>
+</ul>
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

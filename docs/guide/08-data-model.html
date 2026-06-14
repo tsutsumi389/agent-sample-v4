@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>データモデルと永続化 — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>データモデルと永続化</span></nav>
+<h1>データモデルと永続化</h1>
+<p class="lead">このエージェントが「何を」「どこに」「どんなキーで」保存しているかを整理します。会話の履歴・長期記憶・スレッドの見出し情報という3つの保存先を、テーブル構造とER図つきで初心者にもわかるように解説します。</p>
+
+<p>前提として、このプロジェクトはローカルLLM（Ollama）を頭脳にするチャット型エージェントです。会話の状態管理には <strong>LangGraph</strong>（エージェントの処理の流れを管理する仕組み）を使い、データは <strong>PostgreSQL</strong>（pgvector 拡張つき）に保存します。認証はなく v1 はシングルユーザーで、ユーザーは固定値 <code>"default-user"</code>（コード上は <code>user_id</code>）で表されます。永続化レイヤの実装は <code>backend/app/core/db.py</code> に集約されています。</p>
+
+<h2>保存するものの全体像</h2>
+<p>このエージェントが永続化する情報は、大きく次の3種類です。それぞれ役割が異なり、保存先のテーブルも分かれています。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>種別</th><th>場所（テーブル）</th><th>キー</th><th>内容</th><th>管理者</th></tr>
+</thead>
+<tbody>
+<tr><td>会話履歴（チェックポイント）</td><td>checkpoints ほか<br>（LangGraph が自動生成）</td><td><code>thread_id</code></td><td>LangGraph の state＝会話の messages 履歴（人間/AI/ツールのメッセージ列）</td><td>checkpointer<br>(<code>AsyncPostgresSaver</code>)</td></tr>
+<tr><td>長期記憶</td><td>store ほか<br>（vector 768次元つき）</td><td>namespace <code>("memories", user_id)</code> ＋ <code>key</code>（UUID）</td><td><code>{"kind": ..., "content": {...}}</code> 形式の記憶。埋め込みベクトルで意味検索可能</td><td>store<br>(<code>AsyncPostgresStore</code>) ＋ LangMem</td></tr>
+<tr><td>スレッドのメタ情報</td><td>threads</td><td><code>thread_id</code>（主キー）</td><td>タイトル・作成日時・更新日時など、会話一覧の表示に必要な最小情報</td><td>自前の SQL<br>(<code>threads.py</code>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>ここで大事なのは、<strong>checkpoints と store のテーブルは自分で SQL を書いて作るものではない</strong>という点です。これらは LangGraph が用意した <code>setup()</code> という処理が自動でテーブルを作ります（後述）。一方、スレッドの「タイトル」や「作成日時」といったメタ情報は checkpointer の中には含まれていないため、<code>threads</code> という小さなテーブルを1つだけ自前で追加しています。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>「checkpointer（チェックポインタ）」とは、会話の途中経過（state）をDBに保存・復元する仕組みです。これにより、サーバーを再起動しても会話の続きから応答できます。「store（ストア）」は会話をまたいで覚えておきたい長期記憶の保管庫です。両者は別物で、保存先のテーブルも別です。</p></div></aside>
+
+<h2>データの関係（ER図）</h2>
+<p>3つの保存先がどう関係しているかをER図で示します。<code>threads</code> と checkpoints は、データベース上の外部キー制約で結ばれているわけではありません。両者は同じ <code>thread_id</code> という値を共有することで<strong>論理的に</strong>対応づいています。<code>store</code>（長期記憶）はスレッドとは独立しており、<code>user_id</code> 単位で記憶を束ねます。</p>
+
+<figure class="figure"><pre class="mermaid">
+erDiagram
+    THREADS ||--o{ CHECKPOINTS : "thread_id で論理的に対応"
+    THREADS {
+        text thread_id PK "t_xxxx (UUID由来)"
+        text user_id "default-user 固定"
+        text title "会話の見出し"
+        timestamptz created_at "作成日時"
+        timestamptz updated_at "更新日時"
+    }
+    CHECKPOINTS {
+        text thread_id "どの会話か"
+        json state "messages 履歴 (LangGraph管理)"
+    }
+    STORE {
+        text namespace "(memories, user_id)"
+        text key "UUID"
+        json value "kind と content"
+        vector embedding "768次元の意味ベクトル"
+    }
+</pre><figcaption>図1: threads・checkpoints・store の論理的な関係。実線の外部キーではなく thread_id / user_id を介した論理的対応である点に注意。</figcaption></figure>
+
+<p><code>threads</code> テーブルの定義は <code>db.py</code> の <code>ensure_threads_table()</code> にあり、<code>thread_id</code> を主キーとする5カラム構成です。<code>checkpoints</code> 側の具体的なカラム構成は LangGraph 側が決めるため、図では「会話の state を持つ」という論理的な役割だけを示しています。</p>
+
+<h2>長期記憶の namespace（ユーザーごとの分離）</h2>
+<p>長期記憶は <code>store</code> に保存されますが、その際の住所にあたるのが <strong>namespace（名前空間）</strong>です。このプロジェクトでは namespace を <code>("memories", user_id)</code> というタプル（組）で表し、ユーザーごとに記憶を分離します。記憶1件ごとのIDが <code>key</code>（UUID）で、中身が <code>value</code> です。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+    U["user_id = default-user"] --> NS["namespace<br/>（「memories」, user_id）"]
+    NS --> K1["key = UUID ①"]
+    NS --> K2["key = UUID ②"]
+    NS --> K3["key = UUID …"]
+    K1 --> V1["value： kind ／ content<br/>＋ embedding（768次元）"]
+    K2 --> V2["value： kind ／ content<br/>＋ embedding（768次元）"]
+</pre><figcaption>図2: 長期記憶の住所構造。namespace でユーザーを分離し、key（UUID）で1件を特定、value に中身と意味ベクトルを持つ。</figcaption></figure>
+
+<p>このアクセスは <code>store_query.py</code> に実装されています。たとえば記憶の一覧取得は次のように namespace を組み立てて <code>asearch</code> を呼びます。</p>
+
+<span class="code-label">backend/app/memory/store_query.py</span>
+<pre><code>async def list_memories(
+    store: BaseStore, user_id: str, query: str | None, limit: int
+) -&gt; list[dict]:
+    namespace = ("memories", user_id)
+    if query:
+        items = await store.asearch(namespace, query=query, limit=limit)
+    else:
+        # クエリ無しは更新日時の降順を保証する (asearch は順序を保証しない)
+        items = await store.asearch(namespace, limit=limit + 50)
+        items = sorted(items, key=lambda i: i.updated_at, reverse=True)[:limit]</code></pre>
+
+<p>ポイントは、<code>query</code>（検索語）が与えられたときは <code>asearch</code> が埋め込みベクトルによる<strong>意味検索</strong>を行い、関連度の高い順に <code>item.score</code> つきで返すことです。一方クエリが無いときは順序が保証されないため、いったん多めに取得してから <code>updated_at</code> の降順に並べ替えています。削除は <code>delete_memory()</code> が同じ namespace と <code>key</code> を指定して <code>store.adelete()</code> を呼びます。</p>
+
+<p>value の形は LangMem（記憶の抽出・管理ライブラリ）が決める <code>{"kind": ..., "content": {...}}</code> 形式です。表示用には <code>_to_text()</code> が <code>content</code> を取り出して人間可読なテキストに整形します。記憶がどう作られるかは <a href="04-memory.html">記憶アーキテクチャ</a>で詳しく扱います。</p>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">なぜ namespace にuser_idを入れるのか</p><p>設計4本柱の1つ「user_id の貫通」のためです。namespace の2番目に <code>user_id</code> を必ず入れることで、将来マルチユーザー化したときも、あるユーザーの記憶が別ユーザーに混ざらないことが構造的に保証されます。</p></div></aside>
+
+<h2>会話履歴の復元</h2>
+<p>会話画面を再び開いたとき、過去のやり取りを表示するには checkpointer から messages を取り出す必要があります。この処理が <code>history.py</code> の <code>get_thread_messages()</code> です。LangGraph のエージェントに対し <code>aget_state(config)</code> を呼んで state のスナップショットを取得し、その中の <code>messages</code> をフロントエンドが扱える API 形式へ変換します。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+    participant FE as "フロント (React)"
+    participant API as "FastAPI (履歴エンドポイント)"
+    participant H as "history.get_thread_messages"
+    participant CP as "checkpointer (state)"
+    FE->>API: GET /threads/{thread_id}/messages
+    API->>H: agent, thread_id, user_id
+    H->>CP: aget_state(config)
+    CP-->>H: snapshot.values.messages
+    Note over H: Human/AI/Tool を API形へ整形
+    H-->>API: role/content/tool_calls/tool_call_id
+    API-->>FE: JSON 配列で返却
+</pre><figcaption>図3: 会話履歴の復元フロー。checkpointer の state から messages を取り出し、role 付きの API メッセージへ整形して返す。</figcaption></figure>
+
+<p>整形は <code>_to_api_message()</code> がメッセージの型ごとに行います。具体的には次のように対応します。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>LangGraph のメッセージ型</th><th>変換後の role</th><th>付与される主なフィールド</th></tr>
+</thead>
+<tbody>
+<tr><td><code>HumanMessage</code></td><td><code>user</code></td><td><code>content</code>, <code>id</code></td></tr>
+<tr><td><code>AIMessage</code></td><td><code>assistant</code></td><td><code>content</code>, <code>id</code>, （ツール呼び出しがあれば）<code>tool_calls</code></td></tr>
+<tr><td><code>ToolMessage</code></td><td><code>tool</code></td><td><code>content</code>, <code>id</code>, <code>tool_call_id</code>, <code>name</code></td></tr>
+<tr><td><code>SystemMessage</code> 等</td><td>（出力しない）</td><td><code>None</code> を返して除外</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>AIメッセージにツール呼び出しが含まれる場合は <code>tool_calls</code> 配列に <code>id</code> / <code>name</code> / <code>args</code> が入り、その実行結果である ToolMessage には対応する <code>tool_call_id</code> が入ります。この <code>tool_call_id</code> によって「どの呼び出しの結果か」が紐づきます。返り値のフィールド仕様は <a href="07-api-reference.html">APIリファレンス</a>を参照してください。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">config に user_id を渡す理由</p><p><code>aget_state</code> に渡す <code>config</code> には <code>thread_id</code> だけでなく <code>langgraph_user_id</code> も含めています。これは長期記憶の namespace と一貫して user_id をエージェント処理に貫通させるためです。</p></div></aside>
+
+<h2>スレッドのライフサイクル</h2>
+<p>1つの会話スレッドは「作成 → 会話のたびに更新 → 削除」というライフサイクルをたどります。この管理は <code>threads.py</code> の各関数が担当します。</p>
+
+<figure class="figure"><pre class="mermaid">
+stateDiagram-v2
+    [*] --> 作成済み: "create_thread()<br/>thread_id=t_xxxx, title=新しい会話"
+    作成済み --> 更新中: "最初のユーザー発言"
+    更新中 --> 更新中: "touch_and_title()<br/>updated_at 更新・タイトル確定"
+    作成済み --> 削除: "delete_thread()"
+    更新中 --> 削除: "delete_thread()"
+    削除 --> [*]: "threads から行削除<br/>(checkpoint は残置可)"
+</pre><figcaption>図4: スレッドのライフサイクル。作成時は仮タイトル、最初の発言でタイトル確定、削除は threads テーブルからの行削除。</figcaption></figure>
+
+<p>各段階の挙動は次のとおりです。</p>
+
+<ol class="steps">
+<li><strong>作成</strong>: <code>create_thread()</code> が <code>t_</code> ＋ UUID の <code>thread_id</code> を発行し、タイトル未指定なら初期値 <code>"新しい会話"</code>（<code>DEFAULT_TITLE</code>）で1行 INSERT します。</li>
+<li><strong>更新とタイトル自動生成</strong>: 会話が進むたびに <code>touch_and_title()</code> が <code>updated_at</code> を <code>now()</code> に更新します。このとき、タイトルがまだ初期値 <code>"新しい会話"</code> のままなら、最初のユーザーメッセージ由来の候補に差し替えます。すでに確定済みのタイトルは上書きしません。</li>
+<li><strong>削除</strong>: <code>delete_thread()</code> が <code>thread_id</code> と <code>user_id</code> の両方が一致する行を <code>threads</code> から DELETE します。削除できた場合は <code>True</code> を返します。</li>
+</ol>
+
+<p>タイトルの自動生成ルールは <code>derive_title()</code> が定義しています。ユーザーメッセージの<strong>先頭1行の先頭40字</strong>（<code>TITLE_MAX_LEN = 40</code>）を切り出し、空文字なら初期値に戻します。</p>
+
+<span class="code-label">backend/app/services/threads.py</span>
+<pre><code>def derive_title(message: str) -&gt; str:
+    title = message.strip().splitlines()[0] if message.strip() else DEFAULT_TITLE
+    return title[:TITLE_MAX_LEN] or DEFAULT_TITLE</code></pre>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">削除しても会話履歴（checkpoint）は残る</p><p><code>delete_thread()</code> が消すのは <code>threads</code> テーブルのメタ情報（一覧に出すタイトル等）だけです。checkpointer 側の会話履歴はそのまま残置されます。一覧からは消えますが、DB内のチェックポイントは別途クリーンアップしない限り残る点に注意してください。</p></div></aside>
+
+<h2>setup() の役割と pgvector</h2>
+<p>checkpoints や store のテーブルは、アプリ起動時に一度だけ <code>setup()</code> を呼ぶことで作成・マイグレーションされます。<code>db.py</code> の <code>init_persistence()</code> がこれを担当します。</p>
+
+<span class="code-label">backend/app/core/db.py</span>
+<pre><code>checkpointer = AsyncPostgresSaver(pool)
+store = AsyncPostgresStore(
+    pool,
+    index={
+        "dims": 768,
+        "embed": OllamaEmbeddings(
+            model=settings.embed_model,
+            base_url=settings.ollama_base_url,
+            num_ctx=8192,
+        ),
+        "fields": ["$"],
+    },
+)
+await checkpointer.setup()
+await store.setup()</code></pre>
+
+<p>ここで store には <code>index</code> 設定があり、<code>"dims": 768</code> は埋め込みの次元数（nomic-embed-text の出力）、<code>"embed"</code> は埋め込み生成に使う Ollama モデル、<code>"fields": ["$"]</code> は value 全体を埋め込み対象にすることを意味します。これにより長期記憶が意味検索可能になります。</p>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">setup() は冪等だが「必須」、pgvector イメージも必須</p><p><code>setup()</code> は何度呼んでも安全（冪等）ですが、<strong>呼ばないとテーブルは自動では作られません</strong>。起動時に必ず一度実行する必要があります。また store は 768次元のベクトル列を使うため、PostgreSQL に <code>vector</code> 拡張が必要です。<code>CREATE EXTENSION vector</code> が通る <code>pgvector/pgvector:pg17</code> イメージを使わないと <code>setup()</code> が失敗します。標準の postgres イメージでは動きません。</p></div></aside>
+
+<p>なお接続は <code>build_pool()</code> が作る単一の <code>AsyncConnectionPool</code>（共有コネクションプール）の上に、checkpointer と store の両方が同居します。プールは <code>autocommit=True</code> で、<code>dict_row</code>（行を辞書で受け取る設定）を使っています。<code>threads</code> テーブルの作成は <code>ensure_threads_table()</code> が同じプールを使って <code>CREATE TABLE IF NOT EXISTS</code> で行います。</p>
+
+<h2>まとめ</h2>
+<ul>
+<li>保存先は3つ: <strong>checkpoints</strong>（会話履歴/キーは <code>thread_id</code>）、<strong>store</strong>（長期記憶/namespace <code>("memories", user_id)</code> ＋ UUID）、<strong>threads</strong>（スレッドのメタ情報）。</li>
+<li>checkpoints と store のテーブルは <code>setup()</code> が自動生成。threads だけ自前の最小テーブル。</li>
+<li>履歴復元は <code>aget_state</code> で state を取り出し、role 付き API メッセージへ整形（<a href="07-api-reference.html">APIリファレンス</a>）。</li>
+<li>長期記憶は user_id で分離（<a href="04-memory.html">記憶アーキテクチャ</a>）。データベースの設置や pgvector の用意は <a href="10-setup.html">セットアップと運用</a>へ。</li>
+</ul>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

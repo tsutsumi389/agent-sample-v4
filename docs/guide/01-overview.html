@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>はじめに（全体像と用語） — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>はじめに（全体像と用語）</span></nav>
+<h1>はじめに — 全体像と用語</h1>
+<p class="lead">このページは設計書の入口です。このプロジェクトが「何で」「何ができて」「どんな部品でできているか」を、地図のように一望できるようにまとめました。専門用語はその場で一言ずつ説明するので、プログラミングが初めての方でも読み進められます。</p>
+
+<h2>このエージェントは何？</h2>
+<p>このプロジェクトは、<strong>自分のPCの中で動くLLM（大規模言語モデル＝文章を生成・理解するAI）を頭脳にしたチャットボット</strong>です。チャット画面に質問を打ち込むと、AIが文章で答えてくれます。</p>
+<p>ふつうのチャットボットと違うのは、ただ会話するだけではない点です。このエージェントは必要に応じて「<strong>ツール</strong>（AIが呼び出せる小さな機能。計算・日時取得・Web検索など）」を使って調べたり計算したりできます。さらに、会話の中で出てきたあなたの好みや事実を<strong>長期記憶</strong>として覚えておき、次回以降の会話に活かします。</p>
+<p>そしてもう一つ大事なのが、<strong>すべてローカル（自分の環境）で完結する</strong>ことです。AIモデルは <code>Ollama</code>（手元のPCでLLMを動かすためのソフト）で動かすので、会話の内容を外部のクラウドAPIに送りません。プライバシーを保ちながらAIを使えます。</p>
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>このv1（最初のバージョン）は<strong>認証なしのシングルユーザー</strong>を前提にしています。利用者を識別する <code>user_id</code> は <code>"default-user"</code> という固定値が使われます。将来の複数ユーザー対応に備えて、設計のあちこちに <code>user_id</code> を通す「貫通」の仕組みが入っています（後述の4本柱を参照）。</p></div></aside>
+
+<h2>何ができるか（ユースケース例）</h2>
+<p>このエージェントが実際に役立つ場面を、具体例で見てみましょう。</p>
+<ul>
+  <li><strong>調べもの</strong>: 「東京の明日の天気は？」のような質問に、Web検索ツールで最新情報を調べて答える。</li>
+  <li><strong>計算</strong>: 「1500円の品物を3つ、消費税10%込みでいくら？」のような計算をツールで正確に処理する。</li>
+  <li><strong>日付・時刻</strong>: 「今日は何曜日？」「来週の月曜は何日？」など、現在日時を取得して答える。</li>
+  <li><strong>一般的な質問応答</strong>: ツールを使わずに、AI自身の知識で文章を組み立てて返す。</li>
+  <li><strong>あなたを覚える</strong>: 「私はコーヒーより紅茶が好き」と伝えておくと、それを長期記憶に保存し、後日「飲み物を勧めて」と聞いたときに紅茶を提案する。</li>
+</ul>
+<p>どのツールを使うか、あるいはツールを使わず自分で答えるかは、AIがその場で判断します（この判断のしくみは「ReAct」と呼ばれます。後述の用語集で説明します）。</p>
+
+<h2>設計の4本柱</h2>
+<p>この設計には、ぶれない4つの方針（柱）があります。ページのどこを読んでいても、この4つに立ち返れば「なぜこうなっているか」が理解できます。</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>柱</th><th>意味</th></tr></thead>
+  <tbody>
+    <tr><td><strong>① 拡張性（最重要）</strong></td><td>新しいツールや <code>MCP</code>（外部ツール群への共通接続規格）を、エージェントの中心コードを書き換えずに追加できる。機能を増やしても本体が壊れにくい。</td></tr>
+    <tr><td><strong>② ストリーミング</strong></td><td>AIの返答を<strong>一文字ずつ流れるように</strong>表示する。<code>SSE</code>（サーバーから少しずつデータを送る仕組み）を使い、待ち時間を体感的に短くする。</td></tr>
+    <tr><td><strong>③ user_id の貫通</strong></td><td>「誰の会話か」「誰の記憶か」を表す <code>user_id</code> を、フロントからDBまで一本の線で通す。これにより将来の複数ユーザー対応がスムーズになる。</td></tr>
+    <tr><td><strong>④ シンプルさ</strong></td><td>余計な抽象化を避け、標準的な部品を素直に組み合わせる。読みやすく、追いやすい構造を保つ。</td></tr>
+  </tbody>
+</table>
+</div>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">迷ったら拡張性</p><p>4本柱の中でも特に重視されているのが「拡張性」です。詳しい作法は<a href="06-extensibility.html">拡張ガイド</a>にまとめられています。</p></div></aside>
+
+<h2>登場人物と用語集</h2>
+<p>この設計書には、たくさんの部品とカタカナ用語が登場します。先にここで一覧にしておきます。すべて覚える必要はありません。「この単語なんだっけ？」と思ったらここに戻ってきてください。</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>用語</th><th>やさしい説明</th></tr></thead>
+  <tbody>
+    <tr><td><strong>LLM</strong></td><td>大規模言語モデル。文章を理解し、続きの文章を生成するAI。このエージェントの「頭脳」。</td></tr>
+    <tr><td><strong>Ollama</strong></td><td>手元のPCでLLMを動かすためのソフト。これがあるおかげで会話を外部に送らずに済む。</td></tr>
+    <tr><td><strong>gpt-oss</strong></td><td>Ollamaで動かすLLMの1つ。チャットの返答とツール呼び出しを担う主役（コンテキスト長 <code>num_ctx=32768</code>、推論の深さ <code>reasoning="medium"</code>）。</td></tr>
+    <tr><td><strong>qwen3</strong></td><td>もう1つのLLM。制御の判断や記憶の抽出など、裏方の小さな判断を担う（<code>num_ctx=8192</code>）。</td></tr>
+    <tr><td><strong>nomic-embed-text</strong></td><td>文章を<strong>埋め込み（768次元の数値ベクトル）</strong>に変換するモデル。文章の「意味の近さ」を計算でき、記憶の検索に使う。</td></tr>
+    <tr><td><strong>LangGraph</strong></td><td>エージェントの処理の流れを「グラフ（点と線の図）」として組み立てる枠組み。このプロジェクトの土台。</td></tr>
+    <tr><td><strong>create_agent</strong></td><td>LangGraph（<code>langchain.agents.create_agent</code>）が用意する、エージェントを手軽に作る関数。これを呼ぶと標準的なエージェントが組み上がる。</td></tr>
+    <tr><td><strong>ノード / エッジ / StateGraph</strong></td><td>ノード＝処理の一段階、エッジ＝段階どうしのつながり、StateGraph＝それらをまとめて「状態（State）」を持ち回る図。LangGraphの基本部品。</td></tr>
+    <tr><td><strong>checkpointer（短期記憶）</strong></td><td>会話履歴をDBに保存する仕組み。これにより会話の続きを覚えていられる。ここでは <code>AsyncPostgresSaver</code> を使う。</td></tr>
+    <tr><td><strong>Store / pgvector（長期記憶のDB）</strong></td><td>Store＝長期記憶の置き場所。<code>pgvector</code>＝PostgreSQLでベクトル検索を可能にする拡張。ここでは <code>AsyncPostgresStore</code>（vector768）を使う。</td></tr>
+    <tr><td><strong>LangMem</strong></td><td>会話から「覚えておくべき事実」を抽出し、長期記憶に保存・検索するためのライブラリ。</td></tr>
+    <tr><td><strong>MCP</strong></td><td>Model Context Protocol。外部のツール群にAIをつなぐための共通規格。これに対応していれば、いろいろなツールを統一的な作法で追加できる。</td></tr>
+    <tr><td><strong>ツール</strong></td><td>AIが呼び出せる小さな機能。計算・日時取得・Web検索など。AIは状況に応じてツールを選んで使う。</td></tr>
+    <tr><td><strong>SSE</strong></td><td>Server-Sent Events。サーバーからクライアントへデータを少しずつ送り続ける仕組み。返答のストリーミング表示に使う。</td></tr>
+    <tr><td><strong>ReAct</strong></td><td>「考える（Reason）→行動する（Act）」を繰り返すAIの動き方。考えてツールを使い、結果を見てまた考える、を必要なだけ繰り返す。</td></tr>
+    <tr><td><strong>namespace</strong></td><td>記憶を整理するための「引き出しのラベル」。<code>user_id</code> ごとに分けることで、誰の記憶かを区別する。</td></tr>
+    <tr><td><strong>user_id</strong></td><td>利用者を識別する値。v1では <code>"default-user"</code> 固定。会話履歴や記憶を「誰のものか」で紐づける鍵。</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>登場部品の関係を図で見る</h2>
+<p>用語だけだとつながりが見えにくいので、主要な部品が互いにどう関係するかを図にしました。AIの「頭脳」であるLLMを中心に、記憶の置き場所やツールがぶら下がっているイメージです。</p>
+<figure class="figure"><pre class="mermaid">
+flowchart TB
+  Agent["エージェント (LangGraph create_agent)"]
+  subgraph Brain["頭脳 (Ollama 上のLLM)"]
+    GPT["gpt-oss<br/>(チャット+ツール)"]
+    QWEN["qwen3<br/>(制御判断・記憶抽出)"]
+    EMB["nomic-embed-text<br/>(埋め込み 768次元)"]
+  end
+  subgraph Mem["記憶"]
+    CKPT["checkpointer<br/>(短期=会話履歴)"]
+    STORE["Store + pgvector<br/>(長期記憶)"]
+  end
+  subgraph Tools["道具"]
+    TOOL["ツール<br/>(計算/日時/検索)"]
+    MCP["MCP<br/>(外部ツール群)"]
+  end
+  Agent --> GPT
+  Agent --> QWEN
+  Agent --> CKPT
+  Agent --> STORE
+  STORE --> EMB
+  Agent --> TOOL
+  Agent --> MCP
+  LangMem["LangMem"] --> STORE
+  Agent --> LangMem
+</pre><figcaption>図1: 主要部品の関係。エージェントを中心に、頭脳（LLM）・記憶・道具（ツール/MCP）がつながる。長期記憶の検索には埋め込みモデルが使われる。</figcaption></figure>
+<p>この図のとおり、エージェントは1種類のLLMだけでなく、役割に応じて <code>gpt-oss</code> と <code>qwen3</code> を使い分けます。記憶には「会話の続きを覚える短期記憶（checkpointer）」と「人物の事実を覚える長期記憶（Store）」の2系統があります。それぞれの詳しい作りは<a href="04-memory.html">記憶アーキテクチャ</a>で説明します。</p>
+
+<h2>1つの質問が流れる様子</h2>
+<p>では、あなたが質問を1つ送ったとき、裏側で何が起こるのでしょうか。高いところから全体の流れを眺めてみます。細かい部品はあとで掘り下げるので、ここでは「だいたいこう動く」をつかめれば十分です。</p>
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor User as "あなた"
+  participant FE as "フロント (React)"
+  participant BE as "バックエンド (FastAPI)"
+  participant AG as "エージェント (LangGraph)"
+  participant LLM as "LLM (Ollama)"
+  participant TL as "ツール / MCP"
+  participant DB as "PostgreSQL"
+  User->>FE: 質問を入力して送信
+  FE->>BE: メッセージ + user_id を送る
+  BE->>AG: 会話を実行
+  AG->>DB: 過去の会話履歴・長期記憶を読む
+  AG->>LLM: 何をすべきか考えてもらう
+  alt ツールが必要なとき
+    LLM-->>AG: 「このツールを使って」と指示
+    AG->>TL: ツールを実行
+    TL-->>AG: 実行結果を返す
+    AG->>LLM: 結果をふまえて続きを考える
+  end
+  LLM-->>AG: 返答テキストを生成 (少しずつ)
+  AG-->>BE: 生成途中のテキストを流す
+  BE-->>FE: SSE で少しずつ送る
+  FE-->>User: 画面に流れるように表示
+  AG->>DB: 会話履歴・新しい記憶を保存
+</pre><figcaption>図2: 質問1つの流れ。フロントからバックエンド、エージェントを経てLLMやツール、DBが連携し、結果はSSEで少しずつ画面に返る。</figcaption></figure>
+<p>注目してほしいのは、<strong>返答が完成してから一気に表示されるのではなく、生成されたそばからSSEで少しずつ送られてくる</strong>点です。これが4本柱の「②ストリーミング」です。仕組みの詳細は<a href="05-streaming.html">ストリーミング設計</a>にあります。また、ツールを使うかどうかをAIが判断して繰り返す動き（alt の部分）が「ReAct」です。</p>
+
+<h2>全体像</h2>
+<p>最後に、システム全体の構成を1枚にまとめます。大きく分けると「フロント（画面）」「バックエンド（頭脳と司令塔）」「PostgreSQL（記憶の保管庫）」「Ollama（LLM実行）」「ツール・MCP（道具）」の5つです。</p>
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  subgraph Front["フロント"]
+    React["React 19 + TypeScript<br/>(Vite)"]
+  end
+  subgraph Back["バックエンド"]
+    API["FastAPI + uvicorn"]
+    AGENT["LangGraph エージェント<br/>(create_agent)"]
+    LM["LangMem"]
+  end
+  subgraph Data["PostgreSQL (pgvector)"]
+    HIST["会話履歴<br/>(checkpointer)"]
+    LONG["長期記憶<br/>(Store + vector768)"]
+  end
+  subgraph LLMs["Ollama"]
+    M1["gpt-oss"]
+    M2["qwen3"]
+    M3["nomic-embed-text"]
+  end
+  subgraph Ext["道具"]
+    T["ツール"]
+    MC["MCP サーバ"]
+  end
+  React -->|"HTTP / SSE"| API
+  API --> AGENT
+  AGENT --> LM
+  AGENT --> HIST
+  AGENT --> LONG
+  AGENT --> M1
+  AGENT --> M2
+  LONG --> M3
+  AGENT --> T
+  AGENT --> MC
+</pre><figcaption>図3: システム全体像。フロントとバックエンドはHTTP/SSEでつながり、バックエンドはDB・LLM・道具を束ねて働く。</figcaption></figure>
+<p>使われている技術を一覧にすると次のとおりです。</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>層</th><th>主な技術</th></tr></thead>
+  <tbody>
+    <tr><td>フロント</td><td>React 19 + TypeScript 5.9 + Vite 8。SSEは fetch と ReadableStream で受信。</td></tr>
+    <tr><td>バックエンド</td><td>Python 3.12 + uv + FastAPI 0.136 + uvicorn。エージェント基盤は LangGraph 1.x。</td></tr>
+    <tr><td>LLM 実行</td><td>Ollama（gpt-oss / qwen3 / nomic-embed-text）。</td></tr>
+    <tr><td>データベース</td><td>PostgreSQL（pgvector/pgvector:pg17）。会話履歴は checkpointer、長期記憶は Store + vector768。</td></tr>
+  </tbody>
+</table>
+</div>
+<p>各層の役割分担や設計判断の理由は<a href="02-architecture.html">システムアーキテクチャ</a>でくわしく説明します。</p>
+
+<h2>この先の読み方</h2>
+<p>この設計書は、概念から具体へ少しずつ降りていく構成です。目的に合わせて、次の道案内を参考にしてください。</p>
+<ol class="steps">
+  <li><a href="02-architecture.html">システムアーキテクチャ</a> — 全体の層構造と、各部品がどう責任を分け合うかを把握する。まずはここから。</li>
+  <li><a href="03-multi-agent.html">マルチエージェント設計</a> — 複数のLLM・役割をどう組み合わせて1つのエージェントにしているか。</li>
+  <li><a href="04-memory.html">記憶アーキテクチャ</a> — 短期記憶（checkpointer）と長期記憶（Store + LangMem）のしくみ。</li>
+  <li><a href="05-streaming.html">ストリーミング設計</a> — 返答を少しずつ届けるSSEの実装。</li>
+  <li><a href="06-extensibility.html">拡張ガイド</a> — コアを触らずにツールやMCPを追加する作法（4本柱の最重要）。</li>
+  <li><a href="07-api-reference.html">APIリファレンス</a> — フロントとバックエンドをつなぐ各エンドポイントの仕様。</li>
+  <li><a href="08-data-model.html">データモデルと永続化</a> — DBに何がどう保存されるか。</li>
+  <li><a href="09-frontend.html">フロントエンド設計</a> — 画面側の構成とSSE受信の組み立て。</li>
+  <li><a href="10-setup.html">セットアップと運用</a> — 実際に動かす手順と運用のポイント。</li>
+</ol>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">おすすめの読み順</p><p>初めての方は <strong>01 →（今ここ）→ 02 → 04 → 05</strong> の順で読むと、全体像→構造→記憶→ストリーミングと、このプロジェクトの肝を自然な流れでつかめます。手を動かしたい方は先に<a href="10-setup.html">セットアップと運用</a>へ進んでも構いません。</p></div></aside>
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

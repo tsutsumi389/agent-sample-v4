@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>セットアップと運用 — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>セットアップと運用</span></nav>
+<h1>セットアップと運用</h1>
+<p class="lead">このページでは、汎用AIエージェントを自分のマシンで実際に動かすための手順と、運用時に気をつけたい落とし穴をまとめます。前提ツールの準備から <code>make</code> コマンドによる起動、環境変数の意味、よくあるトラブルの対処までを順に説明します。</p>
+
+<p>このエージェントは、ローカルで動く LLM（大規模言語モデル）である Ollama を頭脳に使い、PostgreSQL に会話履歴や記憶を保存するチャット型アプリです。バックエンド（Python + FastAPI）とフロントエンド（React + Vite）の2つのサーバを動かし、別プロセスの Ollama と PostgreSQL に接続します。まずはこの全体像を頭に入れておくと、以降の手順が理解しやすくなります。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart LR
+  subgraph dev["あなたのマシン"]
+    FE["Frontend<br/>Vite dev (:5173)"]
+    BE["Backend<br/>FastAPI / uvicorn (:8000)"]
+    OL["Ollama (:11434)<br/>gpt-oss / qwen3 / nomic-embed-text"]
+    PG["PostgreSQL<br/>pgvector/pgvector:pg17 (:5432)"]
+  end
+  FE -->|"/api を proxy"| BE
+  BE -->|"HTTP"| OL
+  BE -->|"psycopg 接続"| PG
+</pre><figcaption>図1: ローカル環境の構成。フロントエンド・バックエンド・Ollama・PostgreSQL の4つが連携して動く。</figcaption></figure>
+
+<p>構成の詳しい解説は <a href="02-architecture.html">システムアーキテクチャ</a> を、データの保存方法は <a href="08-data-model.html">データモデルと永続化</a> を参照してください。</p>
+
+<h2>前提ツール</h2>
+<p>動かす前に、次のツールをインストールしておく必要があります。バージョンには理由があるので、特に Node.js と Ollama は条件を満たすものを用意してください。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>ツール</th><th>必要バージョン</th><th>なぜ必要か</th></tr>
+</thead>
+<tbody>
+<tr><td>Docker（compose v2）</td><td>最新推奨</td><td>PostgreSQL コンテナを <code>docker compose</code> で起動するため。</td></tr>
+<tr><td>uv</td><td>最新推奨</td><td>バックエンド（Python 3.12）の依存解決と起動に使う高速パッケージ管理ツール。</td></tr>
+<tr><td>Node.js</td><td><strong>20.19+ または 22.12+</strong></td><td>フロントエンドのビルドツール Vite 8 が要求するバージョン。</td></tr>
+<tr><td>Ollama</td><td><strong>&gt;= 0.11</strong></td><td>gpt-oss の streaming（逐次出力）と tools（ツール呼び出し）に対応したバージョンが必要。</td></tr>
+<tr><td>PostgreSQL イメージ</td><td><code>pgvector/pgvector:pg17</code></td><td>ベクトル検索拡張（pgvector）が同梱されたイメージ。<code>docker-compose.yml</code> で固定指定されている。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">プレーンな postgres イメージは使えない</p><p>長期記憶のベクトル検索のために <code>CREATE EXTENSION vector</code> を実行します。素の <code>postgres</code> イメージにはこの拡張が入っていないため失敗します。必ず <code>pgvector/pgvector:pg17</code> を使ってください（<code>docker-compose.yml</code> で指定済みなので、通常はそのままで問題ありません）。</p></div></aside>
+
+<h2>クイックスタート</h2>
+<p>準備が整ったら、リポジトリのルートで次の3ステップを順に実行するだけで起動できます。コマンドは Makefile に定義されているので、細かいオプションを覚える必要はありません。</p>
+
+<ol class="steps">
+<li><code>cp .env.example .env</code> — 環境変数ファイルを用意します。中身は後述の「環境変数(.env)」で説明します。デフォルトのままローカルで動きます。</li>
+<li><code>make setup</code> — 初回セットアップ。PostgreSQL コンテナの起動、Ollama モデルの pull（ダウンロード）、バックエンド・フロントエンドの依存同期をまとめて行います。モデルのダウンロードがあるため初回は時間がかかります。</li>
+<li><code>make dev</code> — PostgreSQL を起動したうえで、バックエンド（:8000）とフロントエンド（:5173）を並列起動します。</li>
+</ol>
+
+<p>起動できたら、ブラウザで <code>http://localhost:5173</code> を開いてください。フロントエンドの開発サーバが <code>/api</code> へのリクエストをバックエンド（:8000）へ転送するので、画面からそのままチャットを試せます。</p>
+
+<p>ターミナルを分けて個別に起動したい場合は、<code>make dev</code> の代わりに次を使います。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>コマンド</th><th>役割</th></tr>
+</thead>
+<tbody>
+<tr><td><code>make backend</code></td><td>ターミナル1で FastAPI（:8000）を起動。</td></tr>
+<tr><td><code>make frontend</code></td><td>ターミナル2で Vite 開発サーバ（:5173）を起動。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">個別起動でも PostgreSQL は必要</p><p><code>make backend</code> / <code>make frontend</code> は PostgreSQL を自動起動しません。先に <code>make up</code> で PostgreSQL を立ち上げておくか、一度 <code>make dev</code> を使ってください。</p></div></aside>
+
+<h2>セットアップの流れ</h2>
+<p><code>make setup</code> と <code>make dev</code> が内部で何を順に実行するのかを図で示します。Makefile では、ターゲットの前提として <code>up</code> や <code>models</code> が連鎖して呼ばれるようになっています。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  S["make setup"] --> U1["up: docker compose up -d --wait<br/>(Postgres を healthcheck 通過まで待機)"]
+  U1 --> M["models: ollama pull<br/>gpt-oss / qwen3 / nomic-embed-text"]
+  M --> B1["backend: uv sync"]
+  B1 --> F1["frontend: npm install"]
+  F1 --> Done["セットアップ完了"]
+</pre><figcaption>図2: make setup の流れ。Postgres 起動 → モデル取得 → 依存同期の順に実行される。</figcaption></figure>
+
+<p><code>make dev</code> は、まず PostgreSQL を起動してから、バックエンドとフロントエンドを <strong>並列</strong>（<code>make -j2</code>）で立ち上げます。並列なので両サーバが同時に起動し、ログも同じターミナルに混ざって表示されます。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor Dev as "あなた"
+  participant Make as "make dev"
+  participant Docker as "Docker (Postgres)"
+  participant BE as "backend (uv + uvicorn)"
+  participant FE as "frontend (npm + vite)"
+  Dev->>Make: make dev 実行
+  Make->>Docker: up (docker compose up -d --wait)
+  Docker-->>Make: healthcheck 通過
+  Note over Make: -j2 で並列起動
+  par 並列
+    Make->>BE: uv sync && uvicorn app.main:app --reload --port 8000
+    BE-->>Dev: :8000 で待ち受け
+  and
+    Make->>FE: npm install && npm run dev
+    FE-->>Dev: :5173 で待ち受け
+  end
+  Dev->>FE: ブラウザで http://localhost:5173 を開く
+</pre><figcaption>図3: make dev の処理順序。Postgres 起動後にバックエンドとフロントエンドが並列で立ち上がる。</figcaption></figure>
+
+<h2>Makefile ターゲット一覧</h2>
+<p>用意されているコマンドの一覧です。ターゲットを忘れたら <code>make help</code> で同じ一覧を表示できます。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>ターゲット</th><th>内容</th><th>実体</th></tr>
+</thead>
+<tbody>
+<tr><td><code>make help</code></td><td>ターゲット一覧を表示</td><td>Makefile 内のコメントを整形表示</td></tr>
+<tr><td><code>make up</code></td><td>PostgreSQL 起動（healthcheck 通過まで待機）</td><td><code>docker compose up -d --wait</code></td></tr>
+<tr><td><code>make down</code></td><td>PostgreSQL 停止</td><td><code>docker compose down</code></td></tr>
+<tr><td><code>make models</code></td><td>必要な Ollama モデルを pull</td><td><code>ollama pull gpt-oss / qwen3 / nomic-embed-text</code></td></tr>
+<tr><td><code>make setup</code></td><td>初回セットアップ（up + models + 依存同期）</td><td><code>up</code> → <code>models</code> → <code>uv sync</code> → <code>npm install</code></td></tr>
+<tr><td><code>make dev</code></td><td>Postgres 起動後、backend + frontend を並列起動</td><td><code>up</code> → <code>make -j2 backend frontend</code></td></tr>
+<tr><td><code>make backend</code></td><td>バックエンドのみ起動（依存同期込み）</td><td><code>uv sync &amp;&amp; uv run uvicorn app.main:app --reload --port 8000</code></td></tr>
+<tr><td><code>make frontend</code></td><td>フロントエンドのみ起動（依存導入込み）</td><td><code>npm install &amp;&amp; npm run dev</code></td></tr>
+<tr><td><code>make test</code></td><td>バックエンドのテスト実行</td><td><code>uv run pytest -q</code></td></tr>
+<tr><td><code>make db-shell</code></td><td>psql で DB に接続</td><td><code>docker compose exec postgres psql -U postgres -d agent</code></td></tr>
+<tr><td><code>make logs</code></td><td>PostgreSQL のログを表示</td><td><code>docker compose logs -f postgres</code></td></tr>
+<tr><td><code>make clean</code></td><td>PostgreSQL 停止 + データ削除</td><td><code>docker compose down -v</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">make clean はデータを消す</p><p><code>make clean</code> は <code>docker compose down -v</code> を実行し、ボリューム（<code>pgdata</code>）ごと削除します。会話履歴も長期記憶もすべて消えるので、本当にリセットしたいとき以外は使わないでください。停止だけなら <code>make down</code> を使います。</p></div></aside>
+
+<h2>環境変数(.env)</h2>
+<p><code>.env</code> はバックエンドの設定値をまとめたファイルです。<code>cp .env.example .env</code> で作ったデフォルト値はローカル開発向けに調整済みなので、基本はそのまま動きます。各値の意味は次のとおりです。設定の読み込み方や使われ方の詳細は <a href="02-architecture.html">システムアーキテクチャ</a> を参照してください。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>環境変数</th><th>デフォルト値</th><th>意味</th></tr>
+</thead>
+<tbody>
+<tr><td><code>APP_DATABASE_URL</code></td><td><code>postgresql://postgres:postgres@localhost:5432/agent</code></td><td>PostgreSQL への接続文字列。<code>docker-compose.yml</code> のユーザー/パスワード/DB 名と一致している。</td></tr>
+<tr><td><code>APP_OLLAMA_BASE_URL</code></td><td><code>http://localhost:11434</code></td><td>Ollama サーバの URL。</td></tr>
+<tr><td><code>APP_CHAT_MODEL</code></td><td><code>gpt-oss</code></td><td>チャット応答とツール呼び出しを担うメインモデル。</td></tr>
+<tr><td><code>APP_MEMORY_MODEL</code></td><td><code>qwen3</code></td><td>長期記憶の抽出（メモリ統合）に使うモデル。構造化出力が安定しているため gpt-oss と分けている。</td></tr>
+<tr><td><code>APP_EMBED_MODEL</code></td><td><code>nomic-embed-text</code></td><td>テキストをベクトル化する埋め込みモデル（768次元）。</td></tr>
+<tr><td><code>APP_NUM_CTX</code></td><td><code>32768</code></td><td>gpt-oss のコンテキスト長（一度に扱えるトークン数）。明示が重要（後述）。</td></tr>
+<tr><td><code>APP_REASONING_EFFORT</code></td><td><code>medium</code></td><td>gpt-oss の推論の深さ。</td></tr>
+<tr><td><code>APP_CORS_ORIGINS</code></td><td><code>["http://localhost:5173"]</code></td><td>API へのアクセスを許可するオリジン（フロントエンドの URL）。</td></tr>
+<tr><td><code>APP_MCP_CONFIG_PATH</code></td><td><code>mcp_servers.json</code></td><td>MCP サーバ定義ファイルのパス。</td></tr>
+<tr><td><code>APP_REFLECTION_DELAY_SECONDS</code></td><td><code>30</code></td><td>バックグラウンドのメモリ統合を遅延実行するまでの秒数（debounce）。</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>記憶の仕組みやメモリ統合の流れは <a href="04-memory.html">記憶アーキテクチャ</a> で詳しく解説しています。MCP サーバの追加方法は <a href="06-extensibility.html">拡張ガイド</a> を参照してください。</p>
+
+<h2>よくある落とし穴・トラブルシュート</h2>
+<p>起動でつまずきやすいポイントをまとめます。多くは「モデルの状態」と「設定の明示」に関するものです。</p>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">① gpt-oss は必ず再 pull する</p><p>2026年2月以前に pull した gpt-oss モデルには、<code>Optional</code> / <code>Union</code> を引数に持つツールを呼び出すと HTTP 500 になるチャットテンプレートのバグがあります。古いモデルを持っている場合は <code>ollama pull gpt-oss</code> で更新してください。<code>make models</code> にもこの pull が含まれています。</p></div></aside>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">② Ollama は 0.11 以上が必要</p><p>gpt-oss の streaming（逐次出力）と tools（ツール呼び出し）を使うには Ollama が <code>&gt;= 0.11</code> である必要があります。古い Ollama だとストリーミングやツールがうまく動きません。<code>ollama --version</code> で確認してください。</p></div></aside>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">③ PostgreSQL は pgvector イメージ必須</p><p>長期記憶で <code>CREATE EXTENSION vector</code> を使うため、プレーンな <code>postgres</code> イメージでは起動に失敗します。<code>pgvector/pgvector:pg17</code> を使ってください（<code>docker-compose.yml</code> で指定済み）。</p></div></aside>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">④ num_ctx を必ず明示する</p><p>Ollama のコンテキスト長（<code>num_ctx</code>）はデフォルトが <code>2048</code> と小さく、放置するとエージェントの入力が途中で切り捨てられ、応答が途切れたり沈黙したりします。<code>APP_NUM_CTX=32768</code> のように明示してください（<code>.env.example</code> で設定済み）。</p></div></aside>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">⑤ モデル未 pull は起動時に即座に失敗する</p><p>モデルの初期化時に <code>validate_model_on_init=True</code> が効いており、必要なモデルが pull されていないと起動時点で fail-fast（即エラー終了）します。「起動直後に落ちる」場合は、まず <code>ollama list</code> で gpt-oss / qwen3 / nomic-embed-text が揃っているか確認し、足りなければ <code>make models</code> を実行してください。</p></div></aside>
+
+<h2>既知の制約 / v1 スコープ外</h2>
+<p>現バージョン（v1）はローカルでの単一ユーザー利用を想定したシンプルな構成です。次の制約を理解しておくと運用時に戸惑いません。</p>
+
+<ul>
+<li><strong>バックグラウンドのメモリ統合は best-effort</strong> — 記憶の抽出・統合はバックエンドのプロセス内（インプロセス）で動きます。プロセスが落ちると、まだ実行されていない保留中の debounce タスクは失われます。</li>
+<li><strong>シングルユーザー</strong> — <code>user_id</code> は API・設定・名前空間まで一貫して配線されていますが、UI は単一ユーザー（固定値 <code>"default-user"</code>）前提です。</li>
+<li><strong>認証なし</strong> — ローカル開発用途を想定しており、ログインや権限管理はありません。</li>
+</ul>
+
+<p>以下は v1 では <strong>意図的に対象外</strong>としている項目です。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>非対象の項目</th><th>補足</th></tr>
+</thead>
+<tbody>
+<tr><td>認証・認可</td><td>ログインやアクセス制御は実装しない。</td></tr>
+<tr><td>マルチワーカーでの SSE ブロードキャスト</td><td>Redis pub/sub などによる複数プロセス間のストリーム共有は行わない。</td></tr>
+<tr><td>ツールのランタイムホットリロード</td><td>ツールや MCP の追加はバックエンド再起動で反映する。稼働中の動的入れ替えはしない。</td></tr>
+<tr><td>本番向けリバースプロキシ調整</td><td>nginx 等での本番チューニングは対象外。</td></tr>
+<tr><td>重厚なテストスイート</td><td><code>make test</code> による基本テストはあるが、網羅的なテストは整備しない。</td></tr>
+</tbody>
+</table>
+</div>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">迷ったらまず動かす</p><p>細かい設計は後から追えます。まずは <code>cp .env.example .env</code> → <code>make setup</code> → <code>make dev</code> の3コマンドで起動し、<code>http://localhost:5173</code> でチャットが返ってくることを確認しましょう。うまくいかないときは、このページの「よくある落とし穴」の①〜⑤を上から順にチェックするのが近道です。</p></div></aside>
+
+<p>ストリーミングの仕組みは <a href="05-streaming.html">ストリーミング設計</a>、API の詳細は <a href="07-api-reference.html">APIリファレンス</a>、画面側の作りは <a href="09-frontend.html">フロントエンド設計</a> を参照してください。</p>
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

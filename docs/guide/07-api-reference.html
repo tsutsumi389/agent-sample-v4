@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API リファレンス — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>API リファレンス</span></nav>
+<h1>API リファレンス</h1>
+<p class="lead">バックエンド（FastAPI）が提供する全エンドポイントの「唯一の真実」です。各APIについて、説明・リクエスト・レスポンス（JSON例）をセットで示します。フロントエンドはここに書かれた仕様だけを根拠に通信します。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>このプロジェクトは認証なしのシングルユーザー構成です（v1）。ユーザーを区別する <code>user_id</code> はフロントエンドが固定値 <code>"default-user"</code> を送ります。<code>user_id</code> がどの層を貫通するかは <a href="04-memory.html">記憶アーキテクチャ</a> も参照してください。</p></div></aside>
+
+<h2>共通仕様</h2>
+<p>まず全エンドポイントに共通するルールを押さえておきましょう。個別仕様を読むときの前提になります。</p>
+<ul>
+  <li><strong>ベースパス</strong>: すべての API は <code>/api/...</code> から始まります。開発時、フロントエンド（Vite 開発サーバー、ポート 5173）は相対パス <code>/api/...</code> を呼び、Vite の proxy（リクエストを別サーバーへ転送する仕組み）がバックエンド（ポート 8000）へ中継します。</li>
+  <li><strong>Content-Type</strong>: SSE（後述の <code>POST /api/chat/stream</code>）以外のレスポンスは <code>application/json</code> です。リクエストボディを送る POST も <code>Content-Type: application/json</code> を付けます。</li>
+  <li><strong>user_id</strong>: 多くの API がクエリパラメータ <code>user_id</code> を受け取ります。省略時のデフォルトは <code>"default-user"</code> ですが、フロントは明示的に送ります。</li>
+  <li><strong>エラー形状</strong>: 4xx / 5xx のエラーは FastAPI 標準の形 <code>{"detail":"..."}</code> で返ります。たとえば存在しないスレッドを操作すると <code>404 {"detail":"thread not found"}</code> です。</li>
+</ul>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">日時の表記</p><p>レスポンス中の <code>created_at</code> / <code>updated_at</code> は UTC の ISO 8601 形式で、末尾が <code>Z</code> になります（例 <code>2026-06-14T09:00:00Z</code>）。バックエンドのシリアライザがこの形に統一しています。</p></div></aside>
+
+<h2>エンドポイント一覧</h2>
+<p>先に全体を俯瞰します。役割ごとに「ヘルスチェック」「スレッド管理」「チャット（SSE）」「記憶」「ツール」の5系統に分かれます。詳細は各見出しで説明します。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>メソッド</th><th>パス</th><th>役割</th><th>成功時</th></tr>
+</thead>
+<tbody>
+<tr><td><span class="badge b-get">GET</span></td><td><code>/api/health</code></td><td>稼働確認</td><td>200</td></tr>
+<tr><td><span class="badge b-get">GET</span></td><td><code>/api/threads</code></td><td>スレッド一覧</td><td>200</td></tr>
+<tr><td><span class="badge b-post">POST</span></td><td><code>/api/threads</code></td><td>スレッド作成</td><td>201</td></tr>
+<tr><td><span class="badge b-get">GET</span></td><td><code>/api/threads/{thread_id}/messages</code></td><td>会話履歴の取得</td><td>200</td></tr>
+<tr><td><span class="badge b-del">DELETE</span></td><td><code>/api/threads/{thread_id}</code></td><td>スレッド削除</td><td>200</td></tr>
+<tr><td><span class="badge b-sse">SSE</span></td><td><code>/api/chat/stream</code></td><td>チャット（ストリーミング応答）</td><td>200 (SSE)</td></tr>
+<tr><td><span class="badge b-get">GET</span></td><td><code>/api/memory</code></td><td>記憶の一覧・検索</td><td>200</td></tr>
+<tr><td><span class="badge b-del">DELETE</span></td><td><code>/api/memory/{key}</code></td><td>記憶の削除</td><td>200</td></tr>
+<tr><td><span class="badge b-get">GET</span></td><td><code>/api/tools</code></td><td>利用可能ツール一覧</td><td>200</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2><span class="badge b-get">GET</span> /api/health</h2>
+<p>バックエンドが起動して応答できるかを確認するためのエンドポイントです。監視や疎通テストに使います。パラメータは不要です。</p>
+<p><strong>リクエスト</strong></p>
+<pre><code>GET /api/health</code></pre>
+<p><strong>レスポンス（200）</strong></p>
+<pre><code>{
+  "status": "ok"
+}</code></pre>
+
+<h2><span class="badge b-get">GET</span> /api/threads</h2>
+<p>そのユーザーが持つ会話スレッド（1つの会話のまとまり）の一覧を返します。並び順は<strong>更新日時の降順</strong>（最近やり取りしたものが先頭）です。</p>
+<p><strong>リクエスト</strong></p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>パラメータ</th><th>場所</th><th>必須</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>user_id</code></td><td>クエリ</td><td>任意（既定 <code>"default-user"</code>）</td><td>対象ユーザー</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>GET /api/threads?user_id=default-user</code></pre>
+<p><strong>レスポンス（200）</strong></p>
+<pre><code>{
+  "threads": [
+    {
+      "thread_id": "8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f",
+      "title": "今日の天気を教えて",
+      "created_at": "2026-06-14T08:00:00Z",
+      "updated_at": "2026-06-14T09:12:00Z"
+    }
+  ]
+}</code></pre>
+<p>スレッドが1件もなければ <code>"threads": []</code> が返ります。</p>
+
+<h2><span class="badge b-post">POST</span> /api/threads</h2>
+<p>新しい会話スレッドを作成します。チャットを始める前に必ずこの API でスレッドを用意します。<strong>このエンドポイントだけ成功ステータスが 201（Created）</strong>で、他の成功は 200 です。</p>
+<p><strong>リクエストボディ</strong></p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>フィールド</th><th>型</th><th>必須</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>user_id</code></td><td>string</td><td>任意（既定 <code>"default-user"</code>）</td><td>所有ユーザー</td></tr>
+<tr><td><code>title</code></td><td>string / null</td><td>任意</td><td>スレッド名。<code>null</code> または省略時は <code>"新しい会話"</code> になる</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>POST /api/threads
+Content-Type: application/json
+
+{
+  "user_id": "default-user",
+  "title": null
+}</code></pre>
+<p><strong>レスポンス（201）</strong></p>
+<pre><code>{
+  "thread_id": "8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f",
+  "title": "新しい会話",
+  "created_at": "2026-06-14T08:00:00Z",
+  "updated_at": "2026-06-14T08:00:00Z"
+}</code></pre>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">タイトルは後から自動で付く</p><p>ここで <code>title</code> を省略しても、最初のチャット送信時にユーザーメッセージの先頭から自動でタイトルが設定されます（詳細は <code>POST /api/chat/stream</code> の項を参照）。</p></div></aside>
+
+<h2><span class="badge b-get">GET</span> /api/threads/{thread_id}/messages</h2>
+<p>指定スレッドの会話履歴（過去のメッセージ列）を取得します。画面を再読み込みしたときなどに、それまでのやり取りを復元するために使います。履歴は checkpointer（会話履歴をDBに保存する仕組み）から読み出されます。</p>
+<p><strong>リクエスト</strong></p>
+<pre><code>GET /api/threads/8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f/messages?user_id=default-user</code></pre>
+<p>スレッドが存在しない、または別ユーザーのものなら <code>404 {"detail":"thread not found"}</code> を返します。</p>
+<p><strong>レスポンス（200）</strong></p>
+<p>メッセージは <code>role</code> によって含まれるフィールドが変わります。値が無いフィールドは<strong>レスポンスから省略</strong>されます（<code>response_model_exclude_none</code> による）。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>role</th><th>意味</th><th>追加フィールド</th></tr></thead>
+<tbody>
+<tr><td><code>user</code></td><td>ユーザーの発言</td><td>—</td></tr>
+<tr><td><code>assistant</code></td><td>エージェントの返答</td><td><code>tool_calls</code>（ツール呼び出しがあれば <code>[{id, name, args}]</code>）</td></tr>
+<tr><td><code>tool</code></td><td>ツール実行の結果</td><td><code>tool_call_id</code>, <code>name</code></td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>{
+  "thread_id": "8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f",
+  "messages": [
+    { "role": "user", "content": "東京の天気は?", "id": "msg-1" },
+    {
+      "role": "assistant",
+      "content": "",
+      "id": "msg-2",
+      "tool_calls": [
+        { "id": "call-1", "name": "get_weather", "args": { "city": "Tokyo" } }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "晴れ、最高28度",
+      "id": "msg-3",
+      "tool_call_id": "call-1",
+      "name": "get_weather"
+    },
+    { "role": "assistant", "content": "東京は晴れ、最高28度です。", "id": "msg-4" }
+  ]
+}</code></pre>
+<p>まだ発言が無いスレッドでは <code>"messages": []</code> になります。</p>
+
+<h2><span class="badge b-del">DELETE</span> /api/threads/{thread_id}</h2>
+<p>指定スレッドを削除します。存在しない、または別ユーザーのスレッドを指定すると <code>404 {"detail":"thread not found"}</code> です。</p>
+<p><strong>リクエスト</strong></p>
+<pre><code>DELETE /api/threads/8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f?user_id=default-user</code></pre>
+<p><strong>レスポンス（200）</strong></p>
+<pre><code>{
+  "deleted": true
+}</code></pre>
+
+<h2><span class="badge b-sse">SSE</span> POST /api/chat/stream</h2>
+<p>このプロジェクトの中心となる API です。ユーザーのメッセージをエージェントに渡し、応答を <strong>SSE（Server-Sent Events）</strong>で少しずつ（トークン単位で）流し返します。SSE とは、1本の HTTP 接続でサーバーがイベントを順次送り続ける仕組みです。SSE 全体の設計思想は <a href="05-streaming.html">ストリーミング設計</a> を参照してください。</p>
+
+<h3>リクエスト</h3>
+<p>通常の JSON で送りますが、レスポンスは SSE で受けるため <code>Accept</code> ヘッダで宣言します。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>ヘッダ</th><th>値</th></tr></thead>
+<tbody>
+<tr><td><code>Content-Type</code></td><td><code>application/json</code></td></tr>
+<tr><td><code>Accept</code></td><td><code>text/event-stream</code></td></tr>
+</tbody>
+</table>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>フィールド</th><th>型</th><th>必須</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>message</code></td><td>string</td><td>必須</td><td>ユーザーの入力テキスト</td></tr>
+<tr><td><code>thread_id</code></td><td>string</td><td>必須</td><td><strong>作成済み</strong>のスレッドID</td></tr>
+<tr><td><code>user_id</code></td><td>string</td><td>任意（既定 <code>"default-user"</code>）</td><td>ユーザー</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>POST /api/chat/stream
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "message": "東京の天気は?",
+  "thread_id": "8f3c0e2a-1b4d-4f6a-9c2e-7a1b2c3d4e5f",
+  "user_id": "default-user"
+}</code></pre>
+
+<aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">スレッドは事前作成が必須</p><p><code>thread_id</code> は <code>POST /api/threads</code> で作っておく必要があります。未知のIDを渡すと、<strong>SSE のバイトを1つも送出する前に</strong>通常の HTTP <code>404 {"detail":"thread not found"}</code> が返ります。これはルータの依存解決（<code>_ensure_thread</code>）でストリーム開始前にチェックしているためで、フロントは「SSE 開始前のエラー」と「SSE 中のエラーイベント」を区別して扱えます。</p></div></aside>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">タイトルの自動設定と keep-alive</p><p>そのスレッドで最初のユーザーメッセージのとき、ストリーミング開始前に<strong>先頭40字</strong>がタイトルとして設定されます。また接続維持のため、<strong>15秒ごとに <code>:</code>（コロン）で始まる keep-alive コメント行</strong>が送られます。コメント行はイベントではないのでパース時は無視します。</p></div></aside>
+
+<h3>SSE で送信される処理の流れ</h3>
+<p>クライアント送信からイベント受信までの全体像です。404 はストリーム開始前、それ以降は SSE イベントとして届く点に注目してください。</p>
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor F as "フロント"
+  participant API as "FastAPI (/api/chat/stream)"
+  participant DEP as "依存解決 (_ensure_thread)"
+  participant AG as "エージェント (stream_agent)"
+  F->>API: POST message / thread_id / user_id
+  API->>DEP: スレッド存在チェック
+  alt スレッドが無い
+    DEP-->>F: HTTP 404 {detail: thread not found}
+  else スレッドあり
+    DEP-->>API: OK (SSE 開始)
+    API->>AG: ストリーム生成開始
+    Note over AG: 初回は先頭40字でタイトル設定
+    AG-->>F: progress {phase, ...}
+    AG-->>F: tool_call {id, name, args}
+    AG-->>F: tool_result {id, name, content}
+    loop 応答生成
+      AG-->>F: token {content, node}
+    end
+    AG-->>F: progress {done: {thread_id, title}}
+  end
+</pre><figcaption>図1: チャット送信から SSE イベント受信までの流れ。404 はストリーム開始前に返る。</figcaption></figure>
+
+<h3>SSE イベントの種類</h3>
+<p>SSE は <code>event:</code> 行でイベント名、<code>data:</code> 行で本文（JSON）を運びます。本 API が送るイベントは次の4種類です。フィールド名は厳密にこの通りです。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>event</th><th>data の中身</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>token</code></td><td><code>{content, node}</code></td><td>応答テキストの断片。<code>node</code> は生成元で <code>responder</code> または <code>synthesizer</code></td></tr>
+<tr><td><code>tool_call</code></td><td><code>{id, name, args}</code></td><td>エージェントがツールを呼び出した</td></tr>
+<tr><td><code>tool_result</code></td><td><code>{id, name, content}</code></td><td>ツールの実行結果。<code>content</code> は<strong>最大2000字に切り詰め</strong></td></tr>
+<tr><td><code>progress</code></td><td><code>{status, ...}</code></td><td>進捗通知。<code>status</code> は必須、その他は拡張フィールド（任意）</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>progress イベントの拡張フィールド</h3>
+<p><code>progress</code> は <code>status</code> 以外に状況を表す任意フィールドを持てます。<strong>すべて optional</strong>で、状況に応じて一部だけ付きます。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>フィールド</th><th>型 / 取りうる値</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>phase</code></td><td><code>routing</code> / <code>plan</code> / <code>step</code> / <code>evaluate</code> / <code>synthesize</code></td><td>現在の処理フェーズ</td></tr>
+<tr><td><code>plan</code></td><td><code>[{id, description}]</code></td><td>立案された計画ステップ一覧</td></tr>
+<tr><td><code>step</code> / <code>total</code></td><td>number</td><td>何番目／全何ステップか</td></tr>
+<tr><td><code>verdict</code></td><td><code>pass</code> / <code>retry</code> / <code>replan</code> / <code>fail</code></td><td>評価フェーズの判定結果</td></tr>
+<tr><td><code>done</code></td><td><code>{thread_id, title}</code></td><td>完了通知（最終的なスレッド情報）</td></tr>
+<tr><td><code>error</code></td><td><code>{message}</code></td><td>エラー発生時のメッセージ</td></tr>
+</tbody>
+</table>
+</div>
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">phase / verdict はマルチエージェントの内部状態</p><p>これらは計画・実行・評価を行うマルチエージェント処理の進捗を表します。各フェーズの意味は <a href="03-multi-agent.html">マルチエージェント設計</a> で詳しく解説しています。</p></div></aside>
+
+<h3>ワイヤ形式（実際に流れるバイト）</h3>
+<p>SSE は1行ずつのテキストです。<code>event:</code> 行と <code>data:</code> 行（JSONは1行）が続き、<strong>空行</strong>でそのイベントが確定します。<code>:</code> で始まる行は keep-alive コメントです。実際のバイト列は次のようになります。</p>
+<pre><code>event: progress
+data: {"status":"working","phase":"routing"}
+
+event: tool_call
+data: {"id":"call-1","name":"get_weather","args":{"city":"Tokyo"}}
+
+event: tool_result
+data: {"id":"call-1","name":"get_weather","content":"晴れ、最高28度"}
+
+event: token
+data: {"content":"東京","node":"responder"}
+
+event: token
+data: {"content":"は晴れ","node":"responder"}
+
+: keep-alive
+
+event: progress
+data: {"status":"done","done":{"thread_id":"8f3c0e2a-...","title":"東京の天気は?"}}
+
+</code></pre>
+
+<h3>フロント側のパース規約</h3>
+<p>フロントは <code>fetch</code> + <code>ReadableStream</code> でこのバイト列を読み、次の手順で1イベントずつ復元します。</p>
+<ol class="steps">
+<li><code>TextDecoder({stream:true})</code> で受信チャンクを UTF-8 として結合する（文字が途中で分割されても安全に連結する）。</li>
+<li><code>event:</code> 行が来たらイベント名を覚える。</li>
+<li><code>data:</code> 行が来たら本文として蓄積する。</li>
+<li><strong>空行</strong>が来たらそこまでをひとつのイベントとして確定し、<code>data</code> を JSON パースして処理する。</li>
+<li><code>:</code> で始まる行（keep-alive コメント）は無視する。</li>
+</ol>
+
+<h2><span class="badge b-get">GET</span> /api/memory</h2>
+<span class="badge b-mem">MEMORY</span>
+<p>そのユーザーの長期記憶（会話をまたいで覚えておく情報）を一覧・検索します。<code>query</code> の有無で動作が変わります。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>パラメータ</th><th>場所</th><th>必須</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>user_id</code></td><td>クエリ</td><td>任意（既定 <code>"default-user"</code>）</td><td>対象ユーザー</td></tr>
+<tr><td><code>query</code></td><td>クエリ</td><td>任意</td><td><strong>省略時</strong>は更新が新しい順。<strong>指定時</strong>はセマンティック検索（意味の近さで検索）</td></tr>
+<tr><td><code>limit</code></td><td>クエリ</td><td>任意（既定 20）</td><td>取得件数の上限</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>GET /api/memory?user_id=default-user&query=好きな食べ物&limit=20</code></pre>
+<p><strong>レスポンス（200）</strong></p>
+<p>各記憶の <code>content</code> は、ストア（記憶を保存する場所）の値から取り出した人間が読めるテキストです。<code>namespace</code> は記憶の所属を表し <code>["memories", user_id]</code> の形です。<code>score</code> は<strong>検索時のみ</strong>値が入り（意味の近さ）、一覧時（query 省略）は <code>null</code> です。</p>
+<pre><code>{
+  "user_id": "default-user",
+  "memories": [
+    {
+      "key": "mem-001",
+      "content": "ユーザーはラーメンが好き",
+      "namespace": ["memories", "default-user"],
+      "updated_at": "2026-06-10T12:00:00Z",
+      "score": 0.82
+    }
+  ]
+}</code></pre>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">score の有無で UI を切り替える</p><p>フロントは <code>score</code> が <code>null</code> かどうかで「一覧表示」と「検索結果（関連度付き）」を見分けられます。</p></div></aside>
+
+<h2><span class="badge b-del">DELETE</span> /api/memory/{key}</h2>
+<span class="badge b-mem">MEMORY</span>
+<p>記憶を <code>key</code> 指定で削除します。</p>
+<pre><code>DELETE /api/memory/mem-001?user_id=default-user</code></pre>
+<p><strong>レスポンス（200）</strong></p>
+<pre><code>{
+  "deleted": true
+}</code></pre>
+
+<h2><span class="badge b-get">GET</span> /api/tools</h2>
+<p>エージェントが現在使えるツールの一覧を返します。各ツールの出どころ（<code>source</code>）が分かるので、UI でネイティブ実装か外部連携かを区別できます。パラメータは不要です。</p>
+<p><strong>レスポンス（200）</strong></p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>フィールド</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td>ツール名</td></tr>
+<tr><td><code>description</code></td><td>ツールの説明</td></tr>
+<tr><td><code>source</code></td><td>出どころ。<code>native</code>（組み込み）／ <code>langmem</code>（記憶系）／ <code>mcp</code>（MCP 連携）</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>{
+  "tools": [
+    { "name": "get_weather", "description": "都市の天気を取得", "source": "native" },
+    { "name": "manage_memory", "description": "長期記憶を管理", "source": "langmem" },
+    { "name": "search_docs", "description": "社内文書を検索", "source": "mcp" }
+  ]
+}</code></pre>
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ツールはコア無改修で増やせる</p><p>ネイティブツールや <span class="badge b-mcp">MCP</span> ツールの追加方法は <a href="06-extensibility.html">拡張ガイド</a> を参照してください。追加するとこの一覧に自動で反映されます。</p></div></aside>
+
+<h2>スレッドのライフサイクル</h2>
+<p>最後に、これらの API がどう連なって1つの会話を成立させるかを状態遷移で確認します。スレッドは「作成 → メッセージ送受信 → 削除」という流れをたどります。</p>
+<figure class="figure"><pre class="mermaid">
+stateDiagram-v2
+  [*] --> 作成済み: "POST /api/threads (201)"
+  作成済み --> 会話中: "POST /api/chat/stream (初回: タイトル自動設定)"
+  会話中 --> 会話中: "POST /api/chat/stream (継続)"
+  会話中 --> 履歴閲覧: "GET /threads/{id}/messages"
+  履歴閲覧 --> 会話中: "続けて送信"
+  作成済み --> 削除済み: "DELETE /api/threads/{id} (200)"
+  会話中 --> 削除済み: "DELETE /api/threads/{id} (200)"
+  削除済み --> [*]
+</pre><figcaption>図2: スレッドのライフサイクル（作成・会話・履歴閲覧・削除）。</figcaption></figure>
+
+<h2>CORS と開発環境</h2>
+<p>開発時はフロント（ポート 5173）とバックエンド（ポート 8000）がポート違いで動くため、ブラウザの CORS（別オリジンへの通信制限）への対応が必要です。本プロジェクトの設定は次の通りです。</p>
+<ul>
+  <li>バックエンドは <code>CORSMiddleware</code> を入れ、<code>allow_origins=["http://localhost:5173"]</code> でフロント開発サーバーからのアクセスを許可します。</li>
+  <li>フロントは相対パス <code>/api/...</code> を呼び、Vite の proxy が <code>:8000</code> へ転送します。これによりフロントのコードにバックエンドの絶対URLを埋め込まずに済みます。</li>
+</ul>
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">フロントは絶対URLを書かない</p><p>常に <code>/api/...</code> の相対パスで呼ぶのが規約です。環境ごとの転送先は Vite proxy（開発）や本番のリバースプロキシ側で吸収します。セットアップ手順は <a href="10-setup.html">セットアップと運用</a> を参照してください。</p></div></aside>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>

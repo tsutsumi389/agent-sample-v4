@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ストリーミング設計 — 汎用AIエージェント 設計書</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script type="module" src="../assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="topbar">
+    <button class="menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="../index.html">
+      <span class="logo">🤖</span>
+      <span>汎用AIエージェント<small>設計書 / Design Docs</small></span>
+    </a>
+    <span class="spacer"></span>
+    <button id="theme-toggle" aria-label="テーマ切替">🌙</button>
+  </header>
+  <div class="layout">
+    <aside id="site-nav" class="sidebar" aria-label="ナビゲーション"></aside>
+    <main id="main" class="content">
+      <article>
+<nav class="breadcrumb"><a href="../index.html">トップ</a> › <span>ストリーミング設計</span></nav>
+<h1>ストリーミング設計</h1>
+<p class="lead">チャットの応答を「全部できあがってから一気に」ではなく、生成しながら少しずつ画面に届ける仕組み（SSE）を解説します。LangGraph のエージェントが流す途中経過を、どうやって SSE のイベントに変換しているかを、実装に沿って読み解きます。</p>
+
+<p>このページの前提です。本プロジェクトは Ollama（ローカルで動く LLM 実行基盤）を頭脳にしたチャット型エージェントで、応答は <code>POST /api/chat/stream</code> という1本の API から流れてきます。サーバ側は FastAPI（Python の Web フレームワーク）、エージェント基盤は LangGraph（複数の処理ノードをグラフとしてつなぐライブラリ）です。応答を生成しているのは複数のエージェント（オーケストレーター・プランナー・エグゼキューター・レスポンダーなど）で、その全体像は<a href="03-multi-agent.html">マルチエージェント設計</a>を参照してください。このページでは「その途中経過をどう画面に届けるか」だけに集中します。</p>
+
+<h2>SSEとは</h2>
+<p>SSE は Server-Sent Events（サーバ送信イベント）の略です。ふつうの HTTP 通信は「リクエストを1回送ると、レスポンスが1回返ってきて終わり」ですが、SSE では <strong>1つの HTTP レスポンスをサーバ側が開いたまま、イベントを少しずつ何度も送り続けます</strong>。クライアントはそれを受け取るたびに画面を更新できるので、LLM が単語（トークン）を生成するそばから、リアルタイムに文字が増えていくチャット体験になります。</p>
+
+<p>ブラウザには SSE 専用の <code>EventSource</code> という標準 API がありますが、本プロジェクトでは<strong>使っていません</strong>。理由はシンプルで、<code>EventSource</code> は <code>GET</code> しかできず、リクエストボディを送れないからです。チャットでは「どのメッセージを」「どのスレッドで」送るかを <code>POST</code> のボディ（JSON）で渡す必要があります。そこでフロントエンドは <code>fetch</code> + <code>ReadableStream</code>（受信データを少しずつ読むための仕組み）で <code>POST</code> しつつ、返ってくる SSE の本文を自前で1行ずつ解釈します。フロント側の受信処理は<a href="09-frontend.html">フロントエンド設計</a>で詳しく扱います。</p>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p>サーバ側は FastAPI の <code>EventSourceResponse</code>（SSE を返す専用レスポンス）を使います。15秒ごとの keep-alive コメント（接続が切れていないか確認するための空メッセージ）は FastAPI のルーティング層が自動で挿入してくれるので、アプリ側のコードでは書きません。</p></div></aside>
+
+<h2>チャット1回の全体シーケンス</h2>
+<p>ユーザーが1回メッセージを送ってから応答が流れ終わるまでの全体像です。<code>POST /api/chat/stream</code> のエンドポイントは <span class="code-label">backend/app/routers/chat.py</span> にあり、本体のストリーミング変換は <span class="code-label">backend/app/services/streaming.py</span> の <code>stream_agent()</code> が担います。</p>
+
+<p>重要なのは、<strong>SSE の本文を1バイトも送る前にスレッドの存在チェックを済ませる</strong>点です。スレッドが見つからなければ <code>404</code> を返しますが、これは FastAPI の依存（<code>Depends</code>）として SSE 開始前に走るため、ストリームが始まったあとに途中でエラーになるのではなく、最初のレスポンスとして素直に <code>404</code> を返せます。スレッドは事前に <code>POST /api/threads</code> で作っておく必要があります（<a href="07-api-reference.html">APIリファレンス</a>参照）。</p>
+
+<figure class="figure"><pre class="mermaid">
+sequenceDiagram
+  actor U as "ブラウザ (fetch)"
+  participant R as "router (chat.py)"
+  participant D as "_ensure_thread (Depends)"
+  participant S as "stream_agent (streaming.py)"
+  participant A as "agent.astream (LangGraph)"
+  U->>R: POST /api/chat/stream<br/>{message, thread_id, user_id}
+  R->>D: 依存解決: スレッド存在チェック
+  alt スレッドが無い
+    D-->>U: 404 (本文送出前)
+  else スレッドあり
+    D-->>R: ChatRequest
+    R->>S: stream_agent(...) 呼び出し
+    S->>S: touch_and_title: タイトル確定
+    S->>A: astream(stream_mode=[messages,updates,custom], subgraphs=True)
+    loop 3タプル (ns, mode, chunk) を逐次受信
+      A-->>S: messages / updates / custom
+      S-->>U: event: token / tool_call / tool_result / progress
+    end
+    S-->>U: event: done {thread_id, title}
+  end
+</pre><figcaption>図1: チャット1回のリクエストから応答ストリーム完了までの流れ。例外が出た場合は token などの代わりに <code>event: error</code> を送って閉じる。</figcaption></figure>
+
+<p>タイトルの確定タイミングにも工夫があります。<code>stream_agent()</code> はストリームを始める前に <code>touch_and_title()</code> でスレッドのタイトルを決めます。タイトルはユーザーのメッセージだけから決まるので、途中で生成を止められても（stop しても）タイトルだけはきちんと残るようにしているのです。</p>
+
+<h2>ストリームの3モードとイベント対応</h2>
+<p>本プロジェクトの心臓部は、LangGraph のエージェントを次のように呼ぶ箇所です。<code>stream_mode</code> に3つのモードを同時指定し、<code>subgraphs=True</code> でサブグラフ（responder や executor といった内部のミニグラフ）内のイベントまで受信します。</p>
+
+<span class="code-label">backend/app/services/streaming.py</span>
+<pre><code>async for part in agent.astream(
+    {"messages": [{"role": "user", "content": message}]},
+    config={...},
+    context=AgentContext(user_id=user_id),
+    stream_mode=["messages", "updates", "custom"],
+    subgraphs=True,
+):</code></pre>
+
+<p><code>subgraphs=True</code> を付けると、<code>astream</code> が返す各要素は <code>(ns, mode, chunk)</code> の3つ組（タプル）になります。<code>ns</code> は「どのサブグラフ由来か」を示す名前空間、<code>mode</code> は上の3モードのどれか、<code>chunk</code> がデータ本体です。コードでは念のため、3要素でないとき（<code>subgraphs=False</code> 相当）にも備えて <code>ns = ()</code> として扱う防御的な分岐を入れています。</p>
+
+<p>この3つの <code>mode</code> が、それぞれ別の SSE イベントに変換されます。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>stream_mode</th><th>chunk の中身</th><th>変換後の SSE イベント</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>messages</code></td><td><code>(AIMessageChunk, metadata)</code></td><td><span class="badge b-sse">token</span></td><td>LLM が生成したテキストの断片（ユーザー向けノード由来のみ）</td></tr>
+<tr><td><code>updates</code></td><td>ノード名→更新内容の dict</td><td><span class="badge b-sse">tool_call</span> / <span class="badge b-sse">tool_result</span></td><td>ツール呼び出しの開始と、その結果</td></tr>
+<tr><td><code>custom</code></td><td>任意の dict（<code>status</code> を含む）</td><td><span class="badge b-sse">progress</span></td><td>計画・ステップ進捗などの自由な進捗通知</td></tr>
+</tbody>
+</table></div>
+
+<p>SSE として実際に送られるイベント名と <code>data</code>（JSON）の形は次のとおりです。<code>data</code> の中身は <code>streaming.py</code> の <code>ServerSentEvent(...)</code> 呼び出しがそのまま反映されます。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>event</th><th>data の形</th><th>送出条件</th></tr></thead>
+<tbody>
+<tr><td><code>token</code></td><td><code>{"content": "文字断片", "node": "responder"}</code></td><td>ユーザー向けノードの <code>AIMessageChunk</code> に空でないテキストがあるとき</td></tr>
+<tr><td><code>tool_call</code></td><td><code>{"id": ..., "name": ..., "args": {...}}</code></td><td><code>AIMessage.tool_calls</code> を id で重複排除して初出のとき</td></tr>
+<tr><td><code>tool_result</code></td><td><code>{"id": ..., "name": ..., "content": "結果(最大2000文字)"}</code></td><td><code>ToolMessage</code> を id で重複排除して初出のとき</td></tr>
+<tr><td><code>progress</code></td><td><code>{"status": "...", ...}</code></td><td><code>custom</code> イベントを受信したとき（必ず <code>status</code> を含む）</td></tr>
+<tr><td><code>done</code></td><td><code>{"thread_id": ..., "title": ...}</code></td><td>ストリームが正常に最後まで流れたとき（最後に1回）</td></tr>
+<tr><td><code>error</code></td><td><code>{"message": "エラー文言"}</code></td><td>途中で例外が発生したとき</td></tr>
+</tbody>
+</table></div>
+
+<aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">ポイント</p><p><code>tool_result</code> の <code>content</code> は <code>TOOL_RESULT_MAX_CHARS = 2000</code> で先頭2000文字に切り詰められます。検索結果のような長大なツール出力で SSE が膨れ上がるのを防ぐためです。</p></div></aside>
+
+<h2>マルチエージェント対応の要点</h2>
+<p>このプロジェクトでは複数のエージェントが内部で会話しながら答えを作ります。そのまま全部を <code>token</code> として流すと、ユーザーには見せたくない「内部の思考（オーケストレーターの判断やプランナーの計画立案）」まで画面に漏れてしまいます。<code>streaming.py</code> は、これを防ぎつつ重複も除くために、いくつかの仕掛けを持っています。</p>
+
+<h3>1. トークンの二重防御フィルタ</h3>
+<p>ユーザーに見せてよいトークンは、最終的な回答を書くノードからのものだけです。コードでは <code>USER_FACING_NODES = {"responder", "synthesizer"}</code> と定義し、これ以外のノード（orchestrator / planner / evaluator / executor などの内部思考）からのトークンは <code>token</code> イベントにしません。</p>
+
+<p>ただしフィルタは1段だけではありません。一次防御は<strong>モデル側</strong>にあります。内部思考ノードの LLM 呼び出しには <code>tags=["nostream"]</code> が付いていて、そもそもトークンが発生源で抑制されます。<code>streaming.py</code> 側の <code>USER_FACING_NODES</code> 判定は、それをすり抜けたものを止める<strong>二次防御</strong>です。2段構えにすることで、内部のつぶやきがユーザーに漏れる事故を確実に防ぎます。</p>
+
+<figure class="figure"><pre class="mermaid">
+flowchart TD
+  A["messages モードの chunk 受信"] --> B{"AIMessageChunk か?"}
+  B -- "いいえ" --> X["無視"]
+  B -- "はい" --> C["origin を決定<br/>(top または langgraph_node)"]
+  C --> D{"origin は<br/>USER_FACING_NODES?<br/>(responder / synthesizer)"}
+  D -- "いいえ (内部思考)" --> X
+  D -- "はい" --> E{"テキストは空でない?"}
+  E -- "空" --> X
+  E -- "本文あり" --> F["event: token を送出<br/>{content, node}"]
+</pre><figcaption>図2: messages モードのトークンフィルタ。一次防御 tags=[&quot;nostream&quot;] をすり抜けたものも、ここで USER_FACING_NODES だけに絞る二重防御。</figcaption></figure>
+
+<h3>2. 重複排除（dedupe）</h3>
+<p><code>updates</code> モードでは、同じ情報が2回届くことがあります。<code>responder</code> サブグラフのメッセージは、サブグラフ内の <code>updates</code> と、親グラフレベルの <code>updates</code>（全履歴の再掲）の両方で届くためです。そこで<strong>親レベルの <code>responder</code> 更新はスキップ</strong>し（<code>ns == () and node_name == "responder"</code> の条件）、実体はサブグラフ内から拾います。</p>
+<p>さらに <code>tool_call</code> は <code>tool_calls</code> の <code>id</code>、<code>tool_result</code> は <code>tool_call_id</code> をキーに、<code>seen_tool_calls</code> / <code>seen_tool_results</code> という集合で初出かどうかを判定し、2回目以降は送りません。これでツール関連イベントが二重に画面表示される事故を防ぎます。</p>
+
+<h3>3. executor 内部の扱い</h3>
+<p>エグゼキューター（実際にツールを動かす実行担当）の中で起きる <code>tool_call</code> / <code>tool_result</code> は、ユーザーへの進捗としては SSE に流します。一方で、後段の<a href="04-memory.html">記憶アーキテクチャ</a>で使うリフレクション（会話を振り返って長期記憶を抽出する処理）の対象には<strong>含めません</strong>。コードでは <code>accumulate = ns == () or top == "responder"</code> という条件で、リフレクション用の <code>turn_messages</code> に積むのは親レベルと responder 由来のメッセージだけに限定しています。executor の中間メッセージはステップごとの「下書き（スクラッチパッド）」なので、記憶に残すべき確定情報ではないからです。</p>
+
+<h3>4. progress は必ず status を持つ</h3>
+<p><code>custom</code> モードの dict は <code>progress</code> イベントとして透過しますが、規約として<strong>必ず <code>status</code>（文字列）を含む</strong>ようにしています。<code>chunk</code> に <code>status</code> が文字列で入っていればそのまま、無ければ <code>{"status": str(...)}</code> の形に整えてから送ります。こうしておくと、古いフロントエンドでも <code>data.status</code> だけ読めば従来どおり進捗を表示できます。</p>
+
+<h2>SSEワイヤ形式の例</h2>
+<p>実際にネットワークを流れるバイト列の例です。SSE では <code>event:</code> 行でイベント名、<code>data:</code> 行で本文（このプロジェクトでは1行の JSON）を送り、<strong>空行</strong>で1イベントの区切りとします。<code>:</code> で始まる行はコメント（keep-alive）なので、受信側は無視します。</p>
+
+<pre><code>event: progress
+data: {"status": "計画を立てています"}
+
+event: tool_call
+data: {"id": "call_abc123", "name": "web_search", "args": {"query": "東京 天気"}}
+
+event: tool_result
+data: {"id": "call_abc123", "name": "web_search", "content": "東京は本日晴れ ..."}
+
+event: token
+data: {"content": "東京", "node": "responder"}
+
+event: token
+data: {"content": "の天気は", "node": "responder"}
+
+: keep-alive
+
+event: token
+data: {"content": "晴れです。", "node": "responder"}
+
+event: done
+data: {"thread_id": "th_001", "title": "東京の天気"}
+
+</code></pre>
+
+<aside class="callout tip"><span class="ico">✅</span><div class="body"><p class="title">読み方のコツ</p><p>1イベント＝「<code>event:</code> 行 ＋ <code>data:</code> 行 ＋ 空行」の3点セットです。フロント側は受信バッファを空行で分割し、各ブロックを <code>event</code> 名で振り分けて処理します。<code>:</code> で始まる行が来ても何もしないでよいだけなので、接続維持の仕組みは受信ロジックを複雑にしません。</p></div></aside>
+
+<h2>エラー時の挙動</h2>
+<p><code>stream_agent()</code> 全体は <code>try / except / finally</code> で囲まれています。ストリーム中に何らかの例外が発生すると、<code>except</code> 節がログを記録したうえで <code>event: error</code> を1回送り、そのままストリームを閉じます。つまり、<strong>エラーは黙って切れるのではなく、必ず <code>error</code> イベントとしてクライアントに伝わってから終了</strong>します。フロントはこれを受けて「エラーが起きました」と表示できます。</p>
+
+<aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">done と error は排他</p><p>正常に最後まで流れたときだけ <code>done</code> を送ります（<code>completed = True</code> のあと）。途中で例外になった場合は <code>done</code> ではなく <code>error</code> が送られます。クライアントは <code>done</code> か <code>error</code> のどちらかが来たらストリーム終了、と判断できます。</p></div></aside>
+
+<p>さらに <code>finally</code> 節では、<strong>正常完了したターンに限って</strong>（<code>completed</code> が真で、かつメッセージが2件以上あるとき）記憶のリフレクションをスケジュールします。リフレクションには今ターンの差分だけでなく、エージェントの最終状態（スレッドの全会話メッセージ）を <code>agent.aget_state()</code> で取り直して渡します。これは <code>thread_id</code> 単位の debounce で保留中タスクがキャンセルされても内容が失われないようにするためです。この記憶の更新フローは<a href="04-memory.html">記憶アーキテクチャ</a>で詳しく解説します。</p>
+
+<h2>まとめ</h2>
+<p>このページでは、LangGraph の <code>astream</code> が返す <code>(ns, mode, chunk)</code> の3タプルを、<code>token</code> / <code>tool_call</code> / <code>tool_result</code> / <code>progress</code> / <code>done</code> / <code>error</code> という SSE イベントに変換する流れを見ました。設計の柱は、<strong>ユーザー向けノードだけをトークン化する二重防御フィルタ</strong>、<strong>id ベースの重複排除</strong>、<strong>必ず <code>status</code> を持つ進捗イベント</strong>、そして <strong>エラーも必ずイベントで伝える</strong>ことです。全体構成は<a href="02-architecture.html">システムアーキテクチャ</a>、内部のエージェント分担は<a href="03-multi-agent.html">マルチエージェント設計</a>、API の正確な仕様は<a href="07-api-reference.html">APIリファレンス</a>を参照してください。</p>
+
+      </article>
+      <nav id="pager" class="pager"></nav>
+    </main>
+    <aside id="toc" class="toc" aria-label="目次"></aside>
+  </div>
+  <footer class="sitefoot">汎用AIエージェント 設計書 · LangGraph + Ollama + LangMem · 図は Mermaid で描画</footer>
+</body>
+</html>
