@@ -43,11 +43,11 @@ flowchart TD
   ORC -->|"route = direct"| RES["responder<br/>(gpt-oss: 即答ReAct)"]
   ORC -->|"route = plan"| PLN["planner<br/>(qwen3: 計画作成)"]
   RES --> END1(["END"])
-  PLN --> EXE["executor<br/>(gpt-oss: 1ステップ実行)"]
-  EXE --> EVA["evaluator<br/>(qwen3: 合否判定)"]
-  EVA -->|"retry / 次ステップ"| EXE
+  PLN --> EXE["executor<br/>(gpt-oss: 依存解決済みステップを並列実行)"]
+  EXE --> EVA["evaluator<br/>(qwen3: 結果群を並列判定)"]
+  EVA -->|"retry / 次ラウンド"| EXE
   EVA -->|"replan"| PLN
-  EVA -->|"全ステップ完了"| SYN["synthesizer<br/>(gpt-oss: 結果統合)"]
+  EVA -->|"実行可能ステップなし"| SYN["synthesizer<br/>(gpt-oss: 結果統合)"]
   SYN --> END2(["END"])
 </pre><figcaption>図1: マルチエージェントグラフの全体像。実線の矢印はコード側（routing.py の純関数）が決定論的に選ぶ条件付きエッジ。</figcaption></figure>
 
@@ -62,8 +62,8 @@ flowchart TD
 <tr><td>orchestrator</td><td>qwen3（control）</td><td>ターン開始時にスクラッチ（後述）をリセットし、要求を <code>DIRECT</code>（高速パス）か <code>PLAN</code>（計画パス）かに分類する。短い入力はLLMを呼ばず即 direct。</td></tr>
 <tr><td>responder</td><td>gpt-oss（chat）</td><td>高速パス担当。全ツール＋LangMem（長期記憶）＋全会話履歴を使う ReAct（考える→ツールを使う→また考える、を繰り返す方式）エージェント。単一エージェント時代と同じ即答役。</td></tr>
 <tr><td>planner</td><td>qwen3（control）</td><td>ゴールを実行可能なステップの列に分解し、JSON で返す。全履歴は渡さず、ゴールとツールカタログだけを見る。</td></tr>
-<tr><td>executor</td><td>gpt-oss（chat）</td><td>「今のステップ」だけをツール付き ReAct で実行する。毎ステップ新しいスクラッチパッドで動き、会話スレッドには永続化しない（<code>checkpointer=False</code>）。</td></tr>
-<tr><td>evaluator</td><td>qwen3（control）</td><td>ステップの実行結果を見て <code>pass</code> / <code>retry</code> / <code>replan</code> を判定し、リトライ・再計画の予算管理（上限超過時の格下げ）も行う。</td></tr>
+<tr><td>executor</td><td>gpt-oss（chat）</td><td>依存（<code>depends_on</code>）が解決済みのステップ群を <code>max_parallel_executors</code> 件まで <code>asyncio.gather</code> で<strong>並列実行</strong>する。各ステップは新しいスクラッチパッドで動き、会話スレッドには永続化しない（<code>checkpointer=False</code>）。</td></tr>
+<tr><td>evaluator</td><td>qwen3（control）</td><td>そのラウンドで実行されたステップの結果群を<strong>並列に</strong>判定し（各ステップ <code>pass</code> / <code>retry</code> / <code>replan</code>）、リトライ・再計画の予算管理（上限超過時の格下げ）も行う。</td></tr>
 <tr><td>synthesizer</td><td>gpt-oss（chat）</td><td>全ステップの結果を統合して最終回答（<code>AIMessage</code>）を作る。失敗時は結果を機械的に連結して必ず何か返す。</td></tr>
 </tbody>
 </table></div>
@@ -71,7 +71,7 @@ flowchart TD
 <aside class="callout note"><span class="ico">ℹ️</span><div class="body"><p class="title">「responder」がいるのに6つ？</p><p>ブリーフでは orchestrator / planner / executor / evaluator / synthesizer / responder の6ノード構成と説明しています。responder は高速パス専用の即答エージェントで、計画パスの executor とはツール・履歴の扱いが異なります（responder は全履歴あり、executor は履歴なし）。</p></div></aside>
 
 <h2>1ターンの流れ（計画パス）</h2>
-<p>複数手順が必要な要求の場合、planner が計画を立て、executor が1ステップずつ実行し、evaluator が毎回その出来を判定します。合格すれば次のステップへ、ダメなら同じステップをやり直し、計画自体が悪ければ planner に戻って立て直します。すべてのステップを終えると synthesizer が結果をまとめます。</p>
+<p>複数手順が必要な要求の場合、planner が計画（各ステップに <code>depends_on</code> 付き）を立て、executor と evaluator が<strong>ラウンド単位</strong>で回ります。1ラウンドでは、依存が解決済みのステップ群を executor が並列実行し、evaluator がその結果群を並列判定します。合格したステップは done になり、その完了で依存が解けた次のステップ群が次ラウンドで走ります。互いに独立なステップは同じラウンドで同時に実行され、依存（DAG）のあるステップだけ順序が守られます。実行可能なステップがなくなったら synthesizer が結果をまとめます。</p>
 
 <figure class="figure"><pre class="mermaid">
 sequenceDiagram
@@ -84,24 +84,33 @@ sequenceDiagram
   U->>O: 複数手順が必要な要求
   O->>O: fresh_scratch() で初期化<br/>分類 → route = plan
   O->>P: 計画作成を依頼
-  P->>P: ゴールをステップ列に分解 (JSON)
-  loop 各ステップ
-    P-->>E: current_step を実行
-    E->>E: ツール付き ReAct で実行<br/>結果を step.result に保存
-    E->>V: 結果を渡す
+  P->>P: ゴールを depends_on 付きステップ列に分解 (JSON)
+  loop 各ラウンド
+    P-->>E: 依存解決済みステップ群 (最大 max_parallel_executors 件)
+    par 並列実行
+      E->>E: ステップA をツール付き ReAct で実行
+    and
+      E->>E: ステップB をツール付き ReAct で実行
+    end
+    E->>V: 実行したステップの結果群
+    par 並列判定
+      V->>V: ステップA を pass/retry/replan 判定
+    and
+      V->>V: ステップB を pass/retry/replan 判定
+    end
     alt pass
-      V->>V: current_step を +1
+      V->>V: status を done に (依存が解け次ラウンドへ)
     else retry
-      V-->>E: 同じステップを再実行
+      V-->>E: そのステップを pending に戻し次ラウンドで再実行
     else replan
       V-->>P: 計画を立て直し
     end
   end
-  V->>S: 全ステップ完了
+  V->>S: 実行可能ステップなし
   S->>U: 結果を統合した最終回答
-</pre><figcaption>図2: 計画パス（route = plan）の1ターンの流れ。executor と evaluator がループを形成する。</figcaption></figure>
+</pre><figcaption>図2: 計画パス（route = plan）の1ターンの流れ。executor と evaluator がラウンド単位で並列に動き、ループを形成する。</figcaption></figure>
 
-<p>重要なのは、executor は <strong>毎ステップ「まっさらなスクラッチパッド」で動く</strong> 点です。<code>graph.py</code> で <code>checkpointer=False</code> として作られているため、前のステップのツール往復のログを引きずらず、与えられたのは「最終目標」「これまでのステップ結果の要約」「今回のタスク」だけ。これによりコンテキストが膨らみすぎず、各ステップに集中できます（詳しくは後述の状態管理を参照）。</p>
+<p>重要なのは、executor の各ステップは <strong>「まっさらなスクラッチパッド」で動く</strong> 点です。<code>graph.py</code> で <code>checkpointer=False</code> として作られているため、他のステップのツール往復のログを引きずらず、与えられるのは「最終目標」「<strong>依存ステップ（<code>depends_on</code>）の結果</strong>」「今回のタスク」だけ。並列実行では「直前まで」という逐次の前提が成り立たないため、履歴は依存関係で明示された先行ステップの結果に限定します。これによりコンテキストが膨らみすぎず、各ステップに集中できます（詳しくは後述の状態管理を参照）。</p>
 
 <h2>高速パス（DIRECT）</h2>
 <p>「こんにちは」「ありがとう」のような短い挨拶や、ひとことで答えられる質問にまで計画を立てるのは無駄です。orchestrator はそうした入力を <code>direct</code> と分類し、responder に即答させます。さらに <code>router_skip_under_chars</code> 文字未満の極端に短い入力は、LLMでの分類すらスキップして即 direct とし、レイテンシ（応答までの待ち時間）をゼロに近づけます。</p>
@@ -126,35 +135,37 @@ sequenceDiagram
 <div class="table-wrap"><table>
 <thead><tr><th>verdict</th><th>意味</th><th>次の行き先</th></tr></thead>
 <tbody>
-<tr><td><code>pass</code></td><td>ステップ成功。<code>current_step</code> を1つ進める</td><td>次のステップ（executor）／全部終われば synthesizer</td></tr>
-<tr><td><code>retry</code></td><td>結果が不十分。同じステップをやり直す</td><td>executor（再実行）</td></tr>
-<tr><td><code>replan</code></td><td>計画自体が筋悪。立て直す</td><td>planner（再計画）</td></tr>
-<tr><td><code>fail</code></td><td>予算超過などで諦め、未完了として前進</td><td>次のステップ／synthesizer</td></tr>
+<tr><td><code>pass</code></td><td>ステップ成功。<code>status</code> を done にする（その完了で依存が解けたステップが次ラウンドの対象に）</td><td>次ラウンド（executor）／実行可能ステップなしなら synthesizer</td></tr>
+<tr><td><code>retry</code></td><td>結果が不十分。<code>status</code> を pending に戻し、ステップ専用の <code>feedback</code> を添えて再実行</td><td>次ラウンド（executor）で再実行</td></tr>
+<tr><td><code>replan</code></td><td>計画自体が筋悪。立て直す（<code>needs_replan</code> を立てる）</td><td>planner（再計画）</td></tr>
+<tr><td><code>fail</code></td><td>予算超過などで諦め、<code>status</code> を failed にして前進</td><td>次ラウンド／synthesizer</td></tr>
 </tbody>
 </table></div>
 
 <figure class="figure"><pre class="mermaid">
 stateDiagram-v2
-  [*] --> Executing: "ステップ実行"
-  Executing --> Evaluating: "結果を判定"
-  Evaluating --> Executing: "retry (attempts <= max_step_retries)"
+  [*] --> Executing: "依存解決済みステップ群を並列実行"
+  Executing --> Evaluating: "結果群を並列判定"
+  Evaluating --> Executing: "retry → pending (attempts <= max_step_retries)"
   Evaluating --> Replanning: "replan (replan_count < max_replans)"
   Replanning --> Executing: "新しい計画で再実行"
-  Evaluating --> Executing: "pass かつ 残りステップあり"
-  Evaluating --> Synthesizing: "pass かつ 全ステップ完了"
+  Evaluating --> Executing: "実行可能 (依存解決済み pending) ステップが残る"
+  Evaluating --> Synthesizing: "実行可能ステップなし (全 done / 依存先 failed で詰み)"
   Evaluating --> Failing: "retry/replan の予算超過 → fail に格下げ"
-  Failing --> Executing: "未完了のまま次ステップへ"
-  Failing --> Synthesizing: "残りステップなし"
+  Failing --> Executing: "未完了のまま次ラウンドへ"
+  Failing --> Synthesizing: "実行可能ステップなし"
   Executing --> Synthesizing: "executor_runs >= max_executor_runs (大域上限)"
   Synthesizing --> [*]
-</pre><figcaption>図4: verdict による状態遷移。どの経路をたどっても必ず Synthesizing（または高速パスの END）に収束する。</figcaption></figure>
+</pre><figcaption>図4: verdict による状態遷移。executor は実行ステップ数ぶん executor_runs を進め、どの経路をたどっても必ず Synthesizing（または高速パスの END）に収束する。</figcaption></figure>
 
 <p>停止性（いつか必ず終わること）は、次の多層の安全装置で保証されています。</p>
 <ul>
-<li><strong>大域上限が最優先</strong>: executor を通過するたびに <code>executor_runs</code> が1ずつ増えます。<code>route_after_evaluation</code> は他のどの判定よりも先にこれを見て、<code>max_executor_runs</code> に達したら verdict が何であろうと無条件に synthesizer へ抜けます。</li>
+<li><strong>大域上限が最優先</strong>: executor は1ラウンドで実行したステップ数ぶん <code>executor_runs</code> を増やします（並列でも累計でカウント）。<code>route_after_evaluation</code> は他のどの判定よりも先にこれを見て、<code>max_executor_runs</code> に達したら無条件に synthesizer へ抜けます。executor は実行可能なステップがある限り必ず1件以上実行するため、ループは必ず前進します。</li>
+<li><strong>実行可能ステップの枯渇</strong>: 依存が解決済みの pending ステップが1つも無くなれば synthesizer へ抜けます。循環依存（planner で <code>sanitize_dependencies</code> が壊す）や依存先が failed で詰んだステップは ready にならないため、ここで自然に停止します。</li>
 <li><strong>retry の上限</strong>: 同じステップの試行回数 <code>attempts</code> が <code>max_step_retries</code> を超えたら、evaluator が verdict を <code>fail</code> に格下げします。</li>
 <li><strong>replan の上限</strong>: <code>replan_count</code> が <code>max_replans</code> 以上なら、同じく <code>fail</code> に格下げします。</li>
-<li><strong>親グラフの recursion_limit</strong>: さらに保険として、LangGraph の親グラフ全体に <code>graph_recursion_limit</code> が設定されています（<code>streaming.py</code> で渡され、<code>config.py</code> が予算から下限を自動補正）。executor 内の ReAct にも <code>executor_recursion_limit</code> という別の上限があります。</li>
+<li><strong>同時実行数の上限</strong>: 1ラウンドで同時に走る executor は <code>max_parallel_executors</code> 件までに絞られ、ローカルLLM（Ollama）への同時リクエスト集中を防ぎます。</li>
+<li><strong>親グラフの recursion_limit</strong>: さらに保険として、LangGraph の親グラフ全体に <code>graph_recursion_limit</code> が設定されています（<code>streaming.py</code> で渡され、<code>config.py</code> が予算から下限を自動補正）。並列化でラウンド数はステップ実行回数以下に収まるため、逐次時代の導出式がそのまま上界として安全です。executor 内の ReAct にも <code>executor_recursion_limit</code> という別の上限があります。</li>
 </ul>
 
 <aside class="callout warn"><span class="ico">⚠️</span><div class="body"><p class="title">予算管理はノード、ルーティングは純関数</p><p>「retry/replan を fail に格下げする」判断は evaluator ノード側で行い、<code>routing.py</code> の純関数には書きません。これにより routing.py は「verdict を見て行き先を返すだけ」の単純な純関数を保てます。役割分担を崩さないことが、デバッグしやすさと停止性の両立につながっています。</p></div></aside>
@@ -179,12 +190,12 @@ stateDiagram-v2
 <li><strong>コードフェンス優先</strong>: <code>```json ... ```</code> のようなコードブロックの中身を最優先で候補にする。</li>
 <li><strong>raw_decode 走査</strong>: それでも見つからなければ、テキスト中のすべての <code>{</code> の位置から <code>json.JSONDecoder().raw_decode</code> を試し、最初に成功した辞書を返す。全滅なら <code>None</code>。</li>
 </ol>
-<p>抽出後は pydantic（データ検証ライブラリ）の <code>PlanSchema</code> / <code>VerdictSchema</code> で型検証します。<code>PlanSchema</code> は <code>steps</code> が文字列のリストでも、<code>description</code>/<code>step</code>/<code>task</code>/<code>content</code> キーを持つ辞書のリストでも拾えるよう柔軟に作られています。さらに <code>parse_with_retry()</code> が「不正なJSONでした、形式だけ出してください」と指示を追記して最大 <code>max_retries</code> 回まで再試行し、それでもダメなら必ず <code>fallback</code> を返します。<strong>パースは「絶対に例外を投げない」契約</strong> です。</p>
+<p>抽出後は pydantic（データ検証ライブラリ）の <code>PlanSchema</code> / <code>VerdictSchema</code> で型検証します。<code>PlanSchema</code> は <code>steps</code> が文字列のリスト（旧形式）でも、<code>description</code>/<code>step</code>/<code>task</code>/<code>content</code> キーを持つ辞書のリストでも拾えるよう柔軟に作られ、依存も <code>depends_on</code>/<code>deps</code>/<code>after</code>/<code>requires</code> など複数のキー名と数字文字列から正規化します。さらに planner 側の <code>sanitize_dependencies()</code> が自己参照・範囲外・重複・循環依存（Kahn 法で検出）を除去するため、LLM が雑な依存を返しても安全です。さらに <code>parse_with_retry()</code> が「不正なJSONでした、形式だけ出してください」と指示を追記して最大 <code>max_retries</code> 回まで再試行し、それでもダメなら必ず <code>fallback</code> を返します。<strong>パースは「絶対に例外を投げない」契約</strong> です。</p>
 
 <aside class="callout danger"><span class="ico">🛑</span><div class="body"><p class="title">構造化出力を使わない理由</p><p><code>trustcall</code> や <code>with_structured_output</code> はローカルLLMでは不安定で、失敗すると例外が外まで漏れてエージェント全体が止まりかねません。「壊れにくいプレーンテキスト出力＋堅牢な抽出＋リトライ＋フォールバック」の方が、モデルの素性に依存せず確実に完走できます。</p></div></aside>
 
 <h2>状態（state）とコンテキスト管理</h2>
-<p>グラフ全体で持ち回るデータは <code>state.py</code> の <code>AgentGraphState</code> に定義されています。ここで一番大事な原則は、<strong>意味的に永続するのは <code>messages</code>（会話履歴）だけ</strong> という点です。計画や進捗（<code>plan</code> / <code>current_step</code> / <code>executor_runs</code> など）は「ターン内スクラッチ」、つまりその1ターン限りの作業メモで、orchestrator が毎ターン <code>fresh_scratch()</code> で必ず初期化します。これにより、前ターンのチェックポイント（DBに保存された途中状態）に残った古い値が悪さをしないよう、決定論的に上書きされます。</p>
+<p>グラフ全体で持ち回るデータは <code>state.py</code> の <code>AgentGraphState</code> に定義されています。ここで一番大事な原則は、<strong>意味的に永続するのは <code>messages</code>（会話履歴）だけ</strong> という点です。計画や進捗（<code>plan</code> / <code>executor_runs</code> / <code>needs_replan</code> など）は「ターン内スクラッチ」、つまりその1ターン限りの作業メモで、orchestrator が毎ターン <code>fresh_scratch()</code> で必ず初期化します。これにより、前ターンのチェックポイント（DBに保存された途中状態）に残った古い値が悪さをしないよう、決定論的に上書きされます。</p>
 
 <figure class="figure"><pre class="mermaid">
 erDiagram
@@ -193,18 +204,19 @@ erDiagram
     list messages "永続 (履歴・LangMem と互換)"
     Route route "direct or plan (毎ターン リセット)"
     str goal "今ターンのユーザー要求"
-    int current_step "進行中のステップ番号"
-    int executor_runs "大域停止カウンタ"
+    int executor_runs "大域停止カウンタ (実行ステップ数の累計)"
     int replan_count "再計画回数"
-    dict evaluation "verdict と feedback"
+    bool needs_replan "直近ラウンドで replan 判定が出た"
     list failure_notes "諦めたステップの記録"
   }
   PlanStep {
     int id "ステップ番号"
     str description "実行タスク (自然文)"
+    list depends_on "先行ステップ ID 群 (全 done で実行可能)"
     str status "pending/running/done/failed"
     str result "結果要約 (切詰め済み)"
     int attempts "このステップの実行回数"
+    str feedback "retry 時の専用改善指示"
   }
 </pre><figcaption>図5: AgentGraphState とその中の PlanStep の構造。messages 以外はすべてターン内スクラッチ。</figcaption></figure>
 
@@ -214,7 +226,7 @@ erDiagram
 <ul>
 <li><strong>responder のみ全履歴を見る</strong>: 高速パスの即答役だけが、過去の会話すべてを参照します。</li>
 <li><strong>planner / evaluator はゴールと結果要約のみ</strong>: 全履歴は渡さず、ゴールやステップ結果の要約だけを見るので、判断がぶれにくく軽量です。</li>
-<li><strong>executor は毎ステップ約8K文字以内に切り詰め</strong>: <code>_scoped_prompt()</code> が「最終目標」「これまでの結果（直近優先で <code>executor_history_max_chars</code> の予算内に詰める）」「今回のタスク」だけを組み立てます。前ステップの retry 時には evaluator の指摘も添えられます。</li>
+<li><strong>executor は各ステップ約8K文字以内に切り詰め</strong>: <code>_scoped_prompt()</code> が「最終目標」「依存ステップ（<code>depends_on</code>）の結果（<code>executor_history_max_chars</code> の予算内）」「今回のタスク」だけを組み立てます。並列実行では逐次の「直前まで」が成り立たないため、履歴は依存関係で明示された先行ステップの結果に限定します。retry 時にはそのステップ専用の <code>feedback</code> も添えられます。</li>
 </ul>
 
 <p>最後に <strong>user_id の貫通</strong> について。ユーザー識別子（v1 では固定値 <code>"default-user"</code>）は2つの経路で同時に渡されます。<code>streaming.py</code> でグラフを呼ぶ際、<code>context=AgentContext(user_id=user_id)</code> として <code>@dataclass</code> のコンテキストを渡すと同時に、<code>configurable</code> にも <code>langgraph_user_id</code> を入れます。</p>

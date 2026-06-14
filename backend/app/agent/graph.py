@@ -3,9 +3,13 @@
 マルチエージェント構成:
 
     START → orchestrator ─┬→ responder → END                          (高速パス)
-                          └→ planner → executor → evaluator ─┬→ executor    (retry / 次ステップ)
+                          └→ planner → executor → evaluator ─┬→ executor    (次ラウンド / retry)
                                                               ├→ planner     (replan)
                                                               └→ synthesizer → END
+
+executor / evaluator はラウンド単位で並列に動く。executor は depends_on が解決済みの
+pending ステップ群を最大 max_parallel_executors 件まで同時実行し、evaluator はその結果群を
+同時評価する。依存 (DAG) のあるステップだけ順序が守られ、独立ステップは並列化される。
 
 ルーティング (routing.py) は LLM を呼ばない純関数で、各ノードは失敗時の
 決定論フォールバックを持つため、LLM の出力がどう壊れても有限ステップで END に到達する。

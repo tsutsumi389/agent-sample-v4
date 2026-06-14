@@ -170,6 +170,47 @@ async def test_scratch_state_resets_between_turns():
     assert second["messages"][-1].content == "2ターン目の回答"
 
 
+async def test_parallel_dag_execution():
+    """依存DAG計画で、独立ステップ(1,2)が1ラウンドで並列実行され、依存ステップ(3)が
+    その後のラウンドで実行される。全2ラウンドで executor_runs=3 に到達する。"""
+    dag_plan = (
+        '{"steps": ['
+        '{"id": 1, "description": "東京の天気", "depends_on": []}, '
+        '{"id": 2, "description": "大阪の天気", "depends_on": []}, '
+        '{"id": 3, "description": "比較表を作る", "depends_on": [1, 2]}'
+        "]}"
+    )
+    factory = _fake_factory(
+        control=GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(content="PLAN"),
+                    AIMessage(content=dag_plan),
+                    # round1: ステップ1,2 を並列評価 / round2: ステップ3 を評価
+                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                ]
+            )
+        ),
+        responder=GenericFakeChatModel(messages=iter([])),
+        synthesizer=GenericFakeChatModel(messages=iter([AIMessage(content="比較表です")])),
+        executor=GenericFakeChatModel(
+            messages=cycle([AIMessage(content="ステップ結果")])
+        ),
+    )
+    agent = _build(factory)
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": LONG_GOAL}]},
+        config=_config(),
+        context=AgentContext(user_id="u1"),
+    )
+    assert result["messages"][-1].content == "比較表です"
+    assert [s["status"] for s in result["plan"]] == ["done", "done", "done"]
+    assert [s["depends_on"] for s in result["plan"]] == [[], [], [1, 2]]
+    assert result["executor_runs"] == 3
+
+
 async def test_global_budget_terminates_retry_loop():
     """evaluator が retry を出し続けても max_executor_runs で必ず終了する。"""
     settings = Settings(max_executor_runs=3, max_step_retries=99)

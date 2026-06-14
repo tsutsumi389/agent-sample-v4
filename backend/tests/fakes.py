@@ -33,9 +33,11 @@ class ScriptedExecutorAgent:
     def __init__(self, outputs: list[str | Exception]) -> None:
         self.outputs = list(outputs)
         self.configs: list[Any] = []
+        self.payloads: list[dict] = []
 
     async def ainvoke(self, payload: dict, config: Any = None) -> dict:
         self.configs.append(config)
+        self.payloads.append(payload)
         if not self.outputs:
             raise RuntimeError("ScriptedExecutorAgent のスクリプトが尽きました")
         out = self.outputs.pop(0)

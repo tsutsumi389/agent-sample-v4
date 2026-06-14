@@ -19,8 +19,25 @@ def _human_state(text: str) -> dict:
     return {"messages": [HumanMessage(content=text)]}
 
 
-def _step(desc: str = "調査する", *, result: str = "", attempts: int = 0, status: str = "pending") -> dict:
-    return {"id": 1, "description": desc, "status": status, "result": result, "attempts": attempts}
+def _step(
+    desc: str = "調査する",
+    *,
+    id: int = 1,
+    depends_on: list[int] | None = None,
+    result: str = "",
+    attempts: int = 0,
+    status: str = "pending",
+    feedback: str = "",
+) -> dict:
+    return {
+        "id": id,
+        "description": desc,
+        "depends_on": depends_on or [],
+        "status": status,
+        "result": result,
+        "attempts": attempts,
+        "feedback": feedback,
+    }
 
 
 # ---- orchestrator ----
@@ -53,16 +70,16 @@ async def test_orchestrator_resets_scratch():
     node = make_orchestrator_node(model, SETTINGS)
     stale = _human_state(LONG_GOAL) | {
         "plan": [_step()],
-        "current_step": 3,
         "executor_runs": 7,
         "replan_count": 1,
+        "needs_replan": True,
         "failure_notes": ["古いメモ"],
     }
     out = await node(stale, {})
     assert out["plan"] == []
-    assert out["current_step"] == 0
     assert out["executor_runs"] == 0
     assert out["replan_count"] == 0
+    assert out["needs_replan"] is False
     assert out["failure_notes"] == []
 
 
@@ -74,14 +91,89 @@ async def test_planner_builds_plan():
     node = make_planner_node(model, [], SETTINGS)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["天気を調べる", "比較表を作る"]
+    # 旧形式 (list[str]) は依存なしの並列ステップとして取り込まれる
     assert out["plan"][0] == {
         "id": 1,
         "description": "天気を調べる",
+        "depends_on": [],
         "status": "pending",
         "result": "",
         "attempts": 0,
+        "feedback": "",
     }
-    assert out["current_step"] == 0
+
+
+async def test_planner_builds_dependency_dag():
+    model = ScriptedModel(
+        [
+            '{"steps": ['
+            '{"id": 1, "description": "東京の天気", "depends_on": []}, '
+            '{"id": 2, "description": "大阪の天気", "depends_on": []}, '
+            '{"id": 3, "description": "比較表", "depends_on": [1, 2]}'
+            "]}"
+        ]
+    )
+    node = make_planner_node(model, [], SETTINGS)
+    out = await node({"goal": LONG_GOAL}, {})
+    assert [s["depends_on"] for s in out["plan"]] == [[], [], [1, 2]]
+
+
+async def test_planner_remaps_zero_based_and_sparse_ids():
+    # LLM が 0始まり / 飛び番 id を出しても depends_on の参照が壊れない
+    model = ScriptedModel(
+        [
+            '{"steps": ['
+            '{"id": 0, "description": "A", "depends_on": []}, '
+            '{"id": 10, "description": "B", "depends_on": [0]}, '
+            '{"id": 20, "description": "C", "depends_on": [0, 10]}'
+            "]}"
+        ]
+    )
+    node = make_planner_node(model, [], SETTINGS)
+    out = await node({"goal": LONG_GOAL}, {})
+    assert [s["id"] for s in out["plan"]] == [1, 2, 3]
+    # 0→1, 10→2, 20→3 にリマップされ、依存関係が保存される
+    assert [s["depends_on"] for s in out["plan"]] == [[], [1], [1, 2]]
+
+
+async def test_planner_remaps_deps_when_middle_step_dropped():
+    # 中間の空 description ステップが間引かれても後続の depends_on がズレない
+    model = ScriptedModel(
+        [
+            '{"steps": ['
+            '{"id": 1, "description": "A", "depends_on": []}, '
+            '{"id": 2, "description": "   ", "depends_on": []}, '  # 空 → 間引かれる
+            '{"id": 3, "description": "C", "depends_on": [1]}, '
+            '{"id": 4, "description": "D", "depends_on": [3]}'
+            "]}"
+        ]
+    )
+    node = make_planner_node(model, [], SETTINGS)
+    out = await node({"goal": LONG_GOAL}, {})
+    assert [s["description"] for s in out["plan"]] == ["A", "C", "D"]
+    # A=1, C=2, D=3。C→A(1) と D→C(2) の依存が正しく保存される
+    assert [s["depends_on"] for s in out["plan"]] == [[], [1], [2]]
+
+
+async def test_planner_sanitizes_invalid_and_cyclic_deps():
+    # 自己参照(2)・範囲外(99)・循環(3→4→3) を含む計画
+    model = ScriptedModel(
+        [
+            '{"steps": ['
+            '{"id": 1, "description": "A", "depends_on": [99]}, '
+            '{"id": 2, "description": "B", "depends_on": [2]}, '
+            '{"id": 3, "description": "C", "depends_on": [4]}, '
+            '{"id": 4, "description": "D", "depends_on": [3]}'
+            "]}"
+        ]
+    )
+    node = make_planner_node(model, [], SETTINGS)
+    out = await node({"goal": LONG_GOAL}, {})
+    deps = {s["id"]: s["depends_on"] for s in out["plan"]}
+    assert deps[1] == []  # 範囲外 99 は除去
+    assert deps[2] == []  # 自己参照は除去
+    # 循環 3↔4 は壊されて少なくとも片方が空になり、全ステップが最終的に実行可能になる
+    assert deps[3] == [] or deps[4] == []
 
 
 async def test_planner_truncates_to_max_steps():
@@ -97,6 +189,7 @@ async def test_planner_falls_back_to_single_step_plan():
     node = make_planner_node(model, [], SETTINGS)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == [LONG_GOAL]
+    assert out["plan"][0]["depends_on"] == []
 
 
 async def test_planner_replan_increments_count_and_includes_failures():
@@ -106,15 +199,14 @@ async def test_planner_replan_increments_count_and_includes_failures():
         "goal": LONG_GOAL,
         "plan": [_step("旧ステップ", result="旧結果", status="done")],
         "replan_count": 0,
-        "failure_notes": ["ステップ2が失敗"],
-        "evaluation": {"verdict": "replan", "feedback": "計画が粗すぎる"},
+        "failure_notes": ["ステップ2「比較表」: 計画が粗すぎる"],
     }
     out = await node(state, {})
     assert out["replan_count"] == 1
+    assert out["needs_replan"] is False
     prompt = model.calls[0][0].content
     assert "前回の計画は失敗しました" in prompt
-    assert "ステップ2が失敗" in prompt
-    assert "計画が粗すぎる" in prompt
+    assert "ステップ2「比較表」: 計画が粗すぎる" in prompt
 
 
 # ---- executor ----
@@ -123,62 +215,134 @@ async def test_planner_replan_increments_count_and_includes_failures():
 async def test_executor_runs_step_and_records_result():
     agent = ScriptedExecutorAgent(["<think>作業中</think>調査結果です"])
     node = make_executor_node(agent, SETTINGS)
-    state = {"goal": LONG_GOAL, "plan": [_step()], "current_step": 0, "executor_runs": 0}
+    state = {"goal": LONG_GOAL, "plan": [_step()], "executor_runs": 0}
     out = await node(state, {"configurable": {"thread_id": "t1"}})
     assert out["plan"][0]["result"] == "調査結果です"
     assert out["plan"][0]["attempts"] == 1
+    assert out["plan"][0]["status"] == "running"  # 評価待ち
     assert out["executor_runs"] == 1
     # recursion_limit と configurable が伝搬している
     assert agent.configs[0]["recursion_limit"] == SETTINGS.executor_recursion_limit
     assert agent.configs[0]["configurable"]["thread_id"] == "t1"
 
 
+async def test_executor_runs_independent_steps_in_parallel():
+    agent = ScriptedExecutorAgent(["結果A", "結果B", "結果C"])
+    node = make_executor_node(agent, SETTINGS)  # max_parallel_executors=3
+    plan = [
+        _step("A", id=1),
+        _step("B", id=2),
+        _step("C", id=3),
+    ]
+    out = await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    # 依存なし3ステップが1ラウンドで全て実行される
+    assert [s["status"] for s in out["plan"]] == ["running", "running", "running"]
+    assert {s["result"] for s in out["plan"]} == {"結果A", "結果B", "結果C"}
+    assert out["executor_runs"] == 3
+
+
+async def test_executor_respects_parallel_cap():
+    agent = ScriptedExecutorAgent(["1", "2", "3", "4", "5"])
+    settings = Settings(max_parallel_executors=2)
+    node = make_executor_node(agent, settings)
+    plan = [_step(f"S{i}", id=i) for i in range(1, 5)]  # 依存なし4ステップ
+    out = await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    # 1ラウンドでは上限2件だけ実行される (残りは次ラウンド)
+    running = [s for s in out["plan"] if s["status"] == "running"]
+    assert len(running) == 2
+    assert out["executor_runs"] == 2
+
+
+async def test_executor_skips_steps_with_unmet_dependencies():
+    agent = ScriptedExecutorAgent(["Aの結果"])
+    node = make_executor_node(agent, SETTINGS)
+    plan = [
+        _step("A", id=1),  # 依存なし → 実行可能
+        _step("B", id=2, depends_on=[1]),  # 1 が未 done → 実行されない
+    ]
+    out = await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    assert out["plan"][0]["status"] == "running"
+    assert out["plan"][1]["status"] == "pending"  # 依存未解決でスキップ
+    assert out["executor_runs"] == 1
+
+
+async def test_executor_passes_dependency_results_in_prompt():
+    agent = ScriptedExecutorAgent(["統合完了"])
+    node = make_executor_node(agent, SETTINGS)
+    plan = [
+        _step("A", id=1, result="Aの成果", status="done"),
+        _step("統合", id=2, depends_on=[1]),
+    ]
+    await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    prompt = agent.payloads[0]["messages"][0].content
+    assert "Aの成果" in prompt  # 依存ステップの結果がプロンプトに渡る
+
+
 async def test_executor_never_raises_on_agent_failure():
     agent = ScriptedExecutorAgent([RuntimeError("ツール大爆発")])
     node = make_executor_node(agent, SETTINGS)
-    state = {"goal": LONG_GOAL, "plan": [_step()], "current_step": 0}
+    state = {"goal": LONG_GOAL, "plan": [_step()]}
     out = await node(state, {})
     assert out["plan"][0]["result"].startswith(EXECUTION_FAILED_MARKER)
 
 
-async def test_executor_without_steps_still_advances_runs():
+async def test_executor_without_ready_steps_still_advances_runs():
     agent = ScriptedExecutorAgent([])
     node = make_executor_node(agent, SETTINGS)
-    out = await node({"plan": [], "current_step": 0, "executor_runs": 2}, {})
+    out = await node({"plan": [], "executor_runs": 2}, {})
     assert out == {"executor_runs": 3}
 
 
 # ---- evaluator ----
 
 
+def _running(**kw) -> dict:
+    kw.setdefault("status", "running")
+    return _step(**kw)
+
+
 async def test_evaluator_empty_result_retries_without_llm():
     model = ScriptedModel([])
     node = make_evaluator_node(model, SETTINGS)
-    state = {"plan": [_step(result="", attempts=1)], "current_step": 0}
+    state = {"plan": [_running(result="", attempts=1)]}
     out = await node(state, {})
-    assert out["evaluation"]["verdict"] == "retry"
+    assert out["plan"][0]["status"] == "pending"  # retry → 再実行待ち
     assert model.calls == []
 
 
-async def test_evaluator_pass_advances_step():
+async def test_evaluator_pass_marks_done():
     model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
     node = make_evaluator_node(model, SETTINGS)
-    state = {"plan": [_step(result="良い結果", attempts=1)], "current_step": 0}
+    state = {"plan": [_running(result="良い結果", attempts=1)]}
     out = await node(state, {})
-    assert out["evaluation"]["verdict"] == "pass"
-    assert out["current_step"] == 1
     assert out["plan"][0]["status"] == "done"
+
+
+async def test_evaluator_retry_sets_feedback_and_pends():
+    model = ScriptedModel(['{"verdict": "retry", "feedback": "もっと具体的に"}'])
+    node = make_evaluator_node(model, SETTINGS)
+    state = {"plan": [_running(result="不十分", attempts=1)]}
+    out = await node(state, {})
+    assert out["plan"][0]["status"] == "pending"
+    assert out["plan"][0]["feedback"] == "もっと具体的に"
 
 
 async def test_evaluator_retry_budget_downgrades_to_fail():
     model = ScriptedModel(['{"verdict": "retry", "feedback": "もう一度"}'])
     node = make_evaluator_node(model, SETTINGS)
     # attempts=2 > max_step_retries=1 → fail に格下げして前進
-    state = {"plan": [_step(result="不十分", attempts=2)], "current_step": 0}
+    state = {"plan": [_running(result="不十分", attempts=2)]}
     out = await node(state, {})
-    assert out["evaluation"]["verdict"] == "fail"
-    assert out["current_step"] == 1
     assert out["plan"][0]["status"] == "failed"
+    assert out["failure_notes"]
+
+
+async def test_evaluator_replan_sets_needs_replan():
+    model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
+    node = make_evaluator_node(model, SETTINGS)
+    state = {"plan": [_running(result="ずれた結果", attempts=1)], "replan_count": 0}
+    out = await node(state, {})
+    assert out["needs_replan"] is True
     assert out["failure_notes"]
 
 
@@ -186,21 +350,55 @@ async def test_evaluator_replan_budget_downgrades_to_fail():
     model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
     node = make_evaluator_node(model, SETTINGS)
     state = {
-        "plan": [_step(result="ずれた結果", attempts=1)],
-        "current_step": 0,
+        "plan": [_running(result="ずれた結果", attempts=1)],
         "replan_count": SETTINGS.max_replans,
     }
     out = await node(state, {})
-    assert out["evaluation"]["verdict"] == "fail"
+    assert out["needs_replan"] is False
+    assert out["plan"][0]["status"] == "failed"
+
+
+async def test_evaluator_evaluates_round_in_parallel():
+    # 2ステップ同時評価。両方 pass を返す
+    model = ScriptedModel(
+        ['{"verdict": "pass", "feedback": ""}', '{"verdict": "pass", "feedback": ""}']
+    )
+    node = make_evaluator_node(model, SETTINGS)
+    plan = [
+        _running(id=1, result="結果1", attempts=1),
+        _running(id=2, result="結果2", attempts=1),
+    ]
+    out = await node({"plan": plan}, {})
+    assert [s["status"] for s in out["plan"]] == ["done", "done"]
+    assert len(model.calls) == 2
+
+
+async def test_evaluator_ignores_non_running_steps():
+    model = ScriptedModel([])  # 評価対象がなければ LLM は呼ばれない
+    node = make_evaluator_node(model, SETTINGS)
+    state = {"plan": [_step(result="x", status="done"), _step(status="pending")]}
+    out = await node(state, {})
+    assert out == {}
+    assert model.calls == []
 
 
 async def test_evaluator_parse_failure_falls_back_to_pass():
     model = ScriptedModel(["壊れた出力", "また壊れた出力"])
     node = make_evaluator_node(model, SETTINGS)
-    state = {"plan": [_step(result="それなりの結果", attempts=1)], "current_step": 0}
+    state = {"plan": [_running(result="それなりの結果", attempts=1)]}
     out = await node(state, {})
-    assert out["evaluation"]["verdict"] == "pass"
-    assert out["current_step"] == 1
+    assert out["plan"][0]["status"] == "done"
+
+
+async def test_evaluator_survives_unexpected_exception_in_round():
+    """eval_one 内で想定外例外 (ここでは description キー欠落) が出ても、gather が node 全体を
+    巻き込まず pass で前進する (executor.run_one と対称な「例外を漏らさない」契約)。"""
+    model = ScriptedModel([])  # LLM 到達前に例外が出るので呼ばれない
+    node = make_evaluator_node(model, SETTINGS)
+    broken = {"id": 1, "depends_on": [], "status": "running", "result": "x", "attempts": 1}
+    out = await node({"plan": [broken]}, {})
+    assert out["plan"][0]["status"] == "done"  # pass フォールバックで確定
+    assert model.calls == []
 
 
 # ---- synthesizer ----

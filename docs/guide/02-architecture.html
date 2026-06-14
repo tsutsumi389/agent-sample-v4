@@ -83,7 +83,7 @@ flowchart TD
 <tbody>
 <tr><td><code>routers/</code></td><td>HTTP リクエストの入口。<code>chat.py</code>(チャット), <code>threads.py</code>(会話スレッド), <code>memory.py</code>(記憶), <code>health.py</code>(死活監視), <code>tools.py</code>(ツール一覧) の各エンドポイントを定義。</td></tr>
 <tr><td><code>agent/</code></td><td>AI の思考エンジン本体。<code>graph.py</code>(エージェント構築), <code>state.py</code>(状態), <code>routing.py</code>(分岐判断), <code>parsing.py</code>(出力解析), <code>prompts.py</code>(指示文), <code>models.py</code>(LLM 定義), <code>context.py</code>(文脈)。</td></tr>
-<tr><td><code>agent/nodes/</code></td><td>マルチエージェントを構成する各役割ノード。<code>orchestrator</code>・<code>planner</code>・<code>executor</code>・<code>evaluator</code>・<code>synthesizer</code> と共通処理 <code>common</code>。詳しくは <a href="03-multi-agent.html">マルチエージェント設計</a>。</td></tr>
+<tr><td><code>agent/nodes/</code></td><td>マルチエージェントを構成する各役割ノード。<code>orchestrator</code>・<code>planner</code>・<code>executor</code>・<code>evaluator</code>・<code>synthesizer</code> と共通処理 <code>common</code>。executor / evaluator は依存（<code>depends_on</code>）が解決済みのステップ群をラウンド単位で並列実行・並列評価する。詳しくは <a href="03-multi-agent.html">マルチエージェント設計</a>。</td></tr>
 <tr><td><code>services/</code></td><td>裏方の処理。<code>streaming.py</code>(SSE 配信), <code>history.py</code>(会話履歴の取得), <code>threads.py</code>(スレッド操作)。</td></tr>
 <tr><td><code>memory/</code></td><td>長期記憶まわり。<code>manager.py</code>(記憶の抽出・反映), <code>tools.py</code>(LangMem のツール), <code>store_query.py</code>(記憶の検索)。<a href="04-memory.html">記憶アーキテクチャ</a>参照。</td></tr>
 <tr><td><code>mcp/</code></td><td><code>loader.py</code>。外部ツールサーバー（MCP）の設定を読み込み、ツールとして取り込む。<a href="06-extensibility.html">拡張ガイド</a>参照。</td></tr>
