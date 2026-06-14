@@ -1,3 +1,5 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ToolCallChip, type UIToolCall } from "./ToolCallChip";
 
 export interface UIMessage {
@@ -27,7 +29,15 @@ export function MessageBubble({ message, streaming = false }: Props) {
           </div>
         )}
         {(message.content !== "" || message.role === "user") && (
-          <div className="message-content">{message.content}</div>
+          <div className={`message-content ${message.role === "assistant" ? "markdown" : ""}`}>
+            {message.role === "assistant" ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {message.content}
+              </ReactMarkdown>
+            ) : (
+              message.content
+            )}
+          </div>
         )}
         {streaming && message.content === "" && message.toolCalls.length === 0 && (
           <div className="message-content thinking">考え中...</div>
