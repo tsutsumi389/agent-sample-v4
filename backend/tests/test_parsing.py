@@ -9,8 +9,9 @@ from app.agent.parsing import (
     parse_json_as,
     parse_with_retry,
     strip_think,
+    structured_or_parse,
 )
-from tests.fakes import ScriptedModel
+from tests.fakes import ScriptedModel, StructuredModel
 
 
 def test_strip_think():
@@ -111,3 +112,60 @@ async def test_parse_with_retry_survives_model_exceptions():
         fallback=lambda: PlanSchema(steps=["fallback"]),
     )
     assert [s.description for s in result.steps] == ["fallback"]
+
+
+# ---- structured_or_parse (openai 構造化出力 / ollama テキストパースの切替) ----
+
+
+async def test_structured_or_parse_uses_structured_output():
+    want = VerdictSchema(verdict="pass", feedback="ok")
+    model = StructuredModel([want])
+    result = await structured_or_parse(
+        model,
+        [HumanMessage(content="判定して")],
+        VerdictSchema,
+        use_structured=True,
+        fallback=VerdictSchema(verdict="retry", feedback=""),
+    )
+    assert result is want
+    assert model.bound_schema is VerdictSchema
+
+
+async def test_structured_or_parse_falls_back_to_text_parse_on_error():
+    # 構造化出力が例外 → parse_with_retry (テキスト) へフォールバックして JSON を拾う
+    model = StructuredModel([RuntimeError("schema 非対応"), '{"verdict": "retry", "feedback": "x"}'])
+    result = await structured_or_parse(
+        model,
+        [HumanMessage(content="判定して")],
+        VerdictSchema,
+        use_structured=True,
+        fallback=VerdictSchema(verdict="pass", feedback=""),
+    )
+    assert result.verdict == "retry"
+
+
+async def test_structured_or_parse_falls_back_on_wrong_type():
+    # 1要素目=schema 非インスタンス(dict) → 型不一致でテキストパースへ。2要素目=JSON文字列を拾う。
+    model = StructuredModel([{"verdict": "retry"}, '{"verdict": "replan", "feedback": "z"}'])
+    result = await structured_or_parse(
+        model,
+        [HumanMessage(content="判定して")],
+        VerdictSchema,
+        use_structured=True,
+        fallback=VerdictSchema(verdict="pass", feedback=""),
+    )
+    assert result.verdict == "replan"
+    assert len(model.calls) == 2  # structured 1回 + parse_with_retry 1回
+
+
+async def test_structured_or_parse_text_path_when_disabled():
+    # use_structured=False: with_structured_output を呼ばず parse_with_retry を使う
+    model = ScriptedModel(['{"verdict": "replan", "feedback": "y"}'])
+    result = await structured_or_parse(
+        model,
+        [HumanMessage(content="判定して")],
+        VerdictSchema,
+        use_structured=False,
+        fallback=VerdictSchema(verdict="pass", feedback=""),
+    )
+    assert result.verdict == "replan"

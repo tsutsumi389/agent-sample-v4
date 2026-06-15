@@ -12,11 +12,11 @@ import asyncio
 import logging
 
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent.nodes.common import EXECUTION_FAILED_MARKER, safe_stream_writer
-from app.agent.parsing import VerdictSchema, parse_with_retry
-from app.agent.prompts import EVALUATOR_PROMPT
+from app.agent.parsing import VerdictSchema, structured_or_parse
+from app.agent.prompts import EVALUATOR_SYSTEM, evaluator_user
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -46,17 +46,19 @@ def make_evaluator_node(model, settings: Settings):
                         "前回の実行が失敗または空の結果でした。別のアプローチで再実行してください。",
                     )
                 else:
-                    parsed = await parse_with_retry(
+                    parsed = await structured_or_parse(
                         model,
                         [
+                            SystemMessage(content=EVALUATOR_SYSTEM),
                             HumanMessage(
-                                content=EVALUATOR_PROMPT.format(
+                                content=evaluator_user(
                                     step_description=step["description"],
                                     result=result,
                                 )
-                            )
+                            ),
                         ],
                         VerdictSchema,
+                        use_structured=settings.supports_structured_output,
                         fallback=VerdictSchema(verdict="pass", feedback=""),
                     )
                     verdict, feedback = parsed.verdict, parsed.feedback

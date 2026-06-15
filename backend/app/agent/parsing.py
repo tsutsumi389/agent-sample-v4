@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any, Literal, TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,14 @@ class VerdictSchema(BaseModel):
     @classmethod
     def coerce_feedback(cls, v: Any) -> str:
         return v if isinstance(v, str) else ""
+
+
+class RouteSchema(BaseModel):
+    """orchestrator のルーティング判定 (構造化出力用)。"""
+
+    route: Literal["direct", "plan"] = Field(
+        description="direct=1回の回答や1〜2ツールで完結する単純な要求 / plan=多段・複数ツールの複雑な要求"
+    )
 
 
 def content_to_text(content: Any) -> str:
@@ -188,3 +196,38 @@ async def parse_with_retry(
         ]
     logger.warning("JSON パースが全滅したため fallback を使用します (schema=%s)", schema.__name__)
     return fallback() if callable(fallback) else fallback
+
+
+async def structured_or_parse(
+    model: Any,
+    messages: list[BaseMessage],
+    schema: type[T],
+    *,
+    use_structured: bool,
+    fallback: T | Callable[[], T],
+    max_retries: int = 2,
+) -> T:
+    """構造化出力が使えるなら with_structured_output、不可ならテキストパースで schema を得る。
+
+    - use_structured=True (openai 等): with_structured_output でスキーマ準拠を保証。
+      失敗 (例外・None) してもテキストパースへフォールバックし、最終的に fallback を返す。
+    - use_structured=False (ollama 等): 従来どおり parse_with_retry。
+    全経路で例外を投げず、必ず schema インスタンス (最悪 fallback) を返す契約。
+    """
+    if use_structured:
+        try:
+            result = await model.with_structured_output(schema).ainvoke(messages)
+            if isinstance(result, schema):
+                return result
+            logger.warning(
+                "構造化出力が想定外の型を返したためテキストパースへフォールバックします (schema=%s)",
+                schema.__name__,
+            )
+        except Exception:
+            logger.exception(
+                "構造化出力に失敗したためテキストパースへフォールバックします (schema=%s)",
+                schema.__name__,
+            )
+    return await parse_with_retry(
+        model, messages, schema, max_retries=max_retries, fallback=fallback
+    )
