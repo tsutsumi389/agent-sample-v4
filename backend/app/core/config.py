@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,12 +21,22 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql://postgres:postgres@localhost:5432/agent"
+    # LLM プロバイダ: "ollama" (ローカル) / "openai" (ChatGPT・OpenAI互換API)。
+    # openai は構造化出力 (Structured Outputs) をネイティブ対応するため、判断系ノード
+    # (orchestrator/planner/evaluator) でテキストパースの代わりに with_structured_output を使う。
+    llm_provider: Literal["ollama", "openai"] = "ollama"
     ollama_base_url: str = "http://localhost:11434"
     chat_model: str = "gpt-oss"
     memory_model: str = "qwen3"
     embed_model: str = "nomic-embed-text"
     num_ctx: int = 32768
     reasoning_effort: str = "medium"
+    # ---- OpenAI / ChatGPT (llm_provider="openai" のとき使用) ----
+    openai_api_key: str = ""
+    # OpenAI 互換エンドポイント (Azure OpenAI / ローカル LLM サーバ等) を使う場合のみ設定。
+    openai_base_url: str | None = None
+    openai_chat_model: str = "gpt-4o-mini"  # responder/executor/synthesizer (自由文生成)
+    openai_control_model: str = "gpt-4o-mini"  # orchestrator/planner/evaluator (構造化判断)
     cors_origins: list[str] = ["http://localhost:5173"]
     mcp_config_path: str = "mcp_servers.json"
     reflection_delay_seconds: int = 30
@@ -61,6 +72,15 @@ class Settings(BaseSettings):
         if self.graph_recursion_limit < needed:
             self.graph_recursion_limit = needed
         return self
+
+    @property
+    def supports_structured_output(self) -> bool:
+        """構造化出力 (with_structured_output) を信頼して使えるプロバイダか。
+
+        openai は Structured Outputs (strict json_schema) でスキーマ準拠を保証する。
+        ollama (gpt-oss/qwen3) は不安定 (langchain#33116) なためテキストパースに委ねる。
+        """
+        return self.llm_provider == "openai"
 
     @property
     def mcp_config_file(self) -> Path:

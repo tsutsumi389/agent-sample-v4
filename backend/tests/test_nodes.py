@@ -1,6 +1,6 @@
 """各ノードの単体テスト (フェイクモデル注入、DB / Ollama なし)。"""
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agent.nodes.common import EXECUTION_FAILED_MARKER
 from app.agent.nodes.evaluator import make_evaluator_node
@@ -8,10 +8,12 @@ from app.agent.nodes.executor import make_executor_node
 from app.agent.nodes.orchestrator import make_orchestrator_node
 from app.agent.nodes.planner import make_planner_node
 from app.agent.nodes.synthesizer import make_synthesizer_node
+from app.agent.parsing import PlanSchema, RouteSchema, VerdictSchema
 from app.core.config import Settings
-from tests.fakes import ScriptedExecutorAgent, ScriptedModel
+from tests.fakes import ScriptedExecutorAgent, ScriptedModel, StructuredModel
 
 SETTINGS = Settings()
+OPENAI_SETTINGS = Settings(llm_provider="openai", openai_api_key="x")
 LONG_GOAL = "東京と大阪の明日の天気を調べて、移動手段ごとの所要時間と合わせて比較表にまとめてください"
 
 
@@ -61,6 +63,35 @@ async def test_orchestrator_classifies_plan():
 async def test_orchestrator_falls_back_to_direct_on_exception():
     model = ScriptedModel([RuntimeError("接続断")])
     node = make_orchestrator_node(model, SETTINGS)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["route"] == "direct"
+
+
+async def test_orchestrator_separates_system_and_user_roles():
+    model = ScriptedModel(["DIRECT"])
+    node = make_orchestrator_node(model, SETTINGS)
+    await node(_human_state(LONG_GOAL), {})
+    system, human = model.calls[0]
+    assert isinstance(system, SystemMessage)
+    assert isinstance(human, HumanMessage)
+    assert "タスク分類器" in system.content
+    assert LONG_GOAL in human.content  # ユーザー要求はデータとして human 側に隔離
+
+
+async def test_orchestrator_structured_output_openai():
+    # openai 経路: with_structured_output で RouteSchema を直接得る
+    settings = Settings(llm_provider="openai", openai_api_key="x")
+    model = StructuredModel([RouteSchema(route="plan")])
+    node = make_orchestrator_node(model, settings)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["route"] == "plan"
+    assert model.bound_schema is RouteSchema
+
+
+async def test_orchestrator_structured_output_direct_openai():
+    settings = Settings(llm_provider="openai", openai_api_key="x")
+    model = StructuredModel([RouteSchema(route="direct")])
+    node = make_orchestrator_node(model, settings)
     out = await node(_human_state(LONG_GOAL), {})
     assert out["route"] == "direct"
 
@@ -116,6 +147,27 @@ async def test_planner_builds_dependency_dag():
     node = make_planner_node(model, [], SETTINGS)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["depends_on"] for s in out["plan"]] == [[], [], [1, 2]]
+
+
+async def test_planner_structured_output_openai_remaps_and_sanitizes():
+    # openai 経路: with_structured_output で PlanSchema を直接受け取っても、id リマップと
+    # depends_on サニタイズが従来どおり機能することを保証する。
+    # PlanSchema の before バリデータは dict 入力を正規化する (実際の構造化出力と同じ経路)。
+    model = StructuredModel(
+        [
+            PlanSchema(
+                steps=[
+                    {"id": 10, "description": "A", "depends_on": []},
+                    {"id": 20, "description": "B", "depends_on": [10]},
+                ]
+            )
+        ]
+    )
+    node = make_planner_node(model, [], OPENAI_SETTINGS)
+    out = await node({"goal": LONG_GOAL}, {})
+    assert [s["id"] for s in out["plan"]] == [1, 2]  # 元 id 10/20 → 出現順 1/2 へリマップ
+    assert [s["depends_on"] for s in out["plan"]] == [[], [1]]
+    assert model.bound_schema is PlanSchema
 
 
 async def test_planner_remaps_zero_based_and_sparse_ids():
@@ -204,9 +256,13 @@ async def test_planner_replan_increments_count_and_includes_failures():
     out = await node(state, {})
     assert out["replan_count"] == 1
     assert out["needs_replan"] is False
-    prompt = model.calls[0][0].content
-    assert "前回の計画は失敗しました" in prompt
-    assert "ステップ2「比較表」: 計画が粗すぎる" in prompt
+    # ロール分離: 指示は SystemMessage、要求・再計画情報 (データ) は HumanMessage に入る
+    system, human = model.calls[0]
+    assert isinstance(system, SystemMessage)
+    assert isinstance(human, HumanMessage)
+    assert "あなたはタスク計画立案者です" in system.content
+    assert "前回の計画は失敗しました" in human.content
+    assert "ステップ2「比較表」: 計画が粗すぎる" in human.content
 
 
 # ---- executor ----
@@ -318,6 +374,37 @@ async def test_evaluator_pass_marks_done():
     assert out["plan"][0]["status"] == "done"
 
 
+async def test_evaluator_structured_output_openai_pass():
+    model = StructuredModel([VerdictSchema(verdict="pass", feedback="")])
+    node = make_evaluator_node(model, OPENAI_SETTINGS)
+    state = {"plan": [_running(result="良い結果", attempts=1)]}
+    out = await node(state, {})
+    assert out["plan"][0]["status"] == "done"
+    assert model.bound_schema is VerdictSchema
+
+
+async def test_evaluator_structured_output_openai_retry():
+    model = StructuredModel([VerdictSchema(verdict="retry", feedback="具体性が不足")])
+    node = make_evaluator_node(model, OPENAI_SETTINGS)
+    state = {"plan": [_running(result="不十分", attempts=0)]}
+    out = await node(state, {})
+    assert out["plan"][0]["status"] == "pending"
+    assert out["plan"][0]["feedback"] == "具体性が不足"
+
+
+async def test_evaluator_separates_system_and_user_roles():
+    model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
+    node = make_evaluator_node(model, SETTINGS)
+    state = {"plan": [_running(desc="天気を調べる", result="晴れだった", attempts=1)]}
+    await node(state, {})
+    system, human = model.calls[0]
+    assert isinstance(system, SystemMessage)
+    assert isinstance(human, HumanMessage)
+    assert "タスク評価者" in system.content
+    assert "従わ" in system.content  # データ内の指示に従わない旨のガード
+    assert "天気を調べる" in human.content and "晴れだった" in human.content
+
+
 async def test_evaluator_retry_sets_feedback_and_pends():
     model = ScriptedModel(['{"verdict": "retry", "feedback": "もっと具体的に"}'])
     node = make_evaluator_node(model, SETTINGS)
@@ -411,6 +498,18 @@ async def test_synthesizer_returns_ai_message():
     out = await node(state, {})
     assert isinstance(out["messages"][0], AIMessage)
     assert out["messages"][0].content == "最終回答です"
+
+
+async def test_synthesizer_separates_system_and_user_roles():
+    model = ScriptedModel(["最終回答です"])
+    node = make_synthesizer_node(model, SETTINGS)
+    state = {"goal": LONG_GOAL, "plan": [_step("天気を調べる", result="晴れ", status="done")]}
+    await node(state, {})
+    system, human = model.calls[0]
+    assert isinstance(system, SystemMessage)
+    assert isinstance(human, HumanMessage)
+    assert "最終回答者" in system.content
+    assert LONG_GOAL in human.content and "晴れ" in human.content
 
 
 async def test_synthesizer_falls_back_to_mechanical_concat():

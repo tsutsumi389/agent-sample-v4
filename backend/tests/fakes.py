@@ -27,6 +27,33 @@ class ScriptedModel:
         return AIMessage(content=out)
 
 
+class StructuredModel:
+    """with_structured_output をサポートするフェイク (openai 経路の検証用)。
+
+    with_structured_output(schema) は self を返し、ainvoke はスクリプトの要素を
+    そのまま返す (通常は schema インスタンス)。要素が Exception なら raise する。
+    structured=False の通常 ainvoke でも同じスクリプトを消費する。
+    """
+
+    def __init__(self, outputs: list[Any]) -> None:
+        self.outputs = list(outputs)
+        self.calls: list[Any] = []
+        self.bound_schema: Any = None
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> "StructuredModel":
+        self.bound_schema = schema
+        return self
+
+    async def ainvoke(self, messages: Any, config: Any = None) -> Any:
+        self.calls.append(messages)
+        if not self.outputs:
+            raise RuntimeError("StructuredModel のスクリプトが尽きました")
+        out = self.outputs.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
 class ScriptedExecutorAgent:
     """executor_agent.ainvoke のフェイク。スクリプトの文字列を最終 AIMessage として返す。"""
 
