@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 
+from app.core.state import get_state
 from app.schemas.chat import ToolsOut
 
 router = APIRouter()
@@ -7,4 +8,4 @@ router = APIRouter()
 
 @router.get("/tools", response_model=ToolsOut)
 async def list_tools(request: Request):
-    return {"tools": request.app.state.tool_info}
+    return {"tools": get_state(request).tool_info}

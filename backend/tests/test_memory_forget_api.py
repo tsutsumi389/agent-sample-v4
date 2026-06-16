@@ -12,7 +12,7 @@ NS = ("memories", "default-user")
 def _client_with_store(store: FakeStore) -> TestClient:
     client = TestClient(create_app())
     client.__enter__()  # lifespan を起動 (skip_startup により store=None)
-    client.app.state.store = store  # フェイク Store を差し込む
+    client.app.state.deps.store = store  # フェイク Store を差し込む
     return client
 
 

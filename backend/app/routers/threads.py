@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 
+from app.core.state import get_state
 from app.schemas.chat import (
     DeletedOut,
     MessagesOut,
@@ -15,14 +16,14 @@ router = APIRouter()
 
 @router.get("/threads", response_model=ThreadListOut)
 async def list_threads(request: Request, user_id: str = "default-user"):
-    rows = await threads_service.list_threads(request.app.state.pool, user_id)
+    rows = await threads_service.list_threads(get_state(request).pool, user_id)
     return {"threads": rows}
 
 
 @router.post("/threads", status_code=201, response_model=ThreadOut)
 async def create_thread(body: ThreadCreate, request: Request):
     return await threads_service.create_thread(
-        request.app.state.pool, body.user_id, body.title
+        get_state(request).pool, body.user_id, body.title
     )
 
 
@@ -34,7 +35,7 @@ async def create_thread(body: ThreadCreate, request: Request):
 async def thread_messages(
     thread_id: str, request: Request, user_id: str = "default-user"
 ):
-    state = request.app.state
+    state = get_state(request)
     thread = await threads_service.get_thread(state.pool, thread_id, user_id)
     if thread is None:
         raise HTTPException(status_code=404, detail="thread not found")
@@ -47,7 +48,7 @@ async def delete_thread(
     thread_id: str, request: Request, user_id: str = "default-user"
 ):
     deleted = await threads_service.delete_thread(
-        request.app.state.pool, thread_id, user_id
+        get_state(request).pool, thread_id, user_id
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="thread not found")
