@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 
+from app.core.state import get_state
 from app.memory.forget import select_candidates
 from app.memory.store_query import (
     batch_delete_memories,
@@ -27,20 +28,20 @@ async def get_memories(
     query: str | None = None,
     limit: int = 20,
 ):
-    memories = await list_memories(request.app.state.store, user_id, query, limit)
+    memories = await list_memories(get_state(request).store, user_id, query, limit)
     return {"user_id": user_id, "memories": memories}
 
 
 @router.delete("/memory/{key}", response_model=DeletedOut)
 async def remove_memory(key: str, request: Request, user_id: str = "default-user"):
-    await delete_memory(request.app.state.store, user_id, key)
+    await delete_memory(get_state(request).store, user_id, key)
     return {"deleted": True}
 
 
 @router.post("/memory/forget/preview", response_model=ForgetPreviewOut)
 async def forget_preview(body: ForgetPreviewIn, request: Request):
     """スコープ付き一括忘却の候補を返す (非破壊・確認用)。"""
-    store = request.app.state.store
+    store = get_state(request).store
     candidates = await search_forget_candidates(
         store, body.user_id, body.query, body.limit
     )
@@ -56,7 +57,7 @@ async def forget_confirm(body: ForgetConfirmIn, request: Request):
     パラメータ (既存の DELETE /memory/{key} と同じ信頼モデル)。確認ゲートの強制は
     フロント/エージェントの 2 段階プロトコルと keys の上限 (ForgetConfirmIn) で担保する。
     """
-    store = request.app.state.store
+    store = get_state(request).store
     result = await batch_delete_memories(store, body.user_id, body.keys)
     verification = await verify_forgotten(store, body.user_id, result["deleted_keys"])
     return {
