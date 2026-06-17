@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.store.base import BaseStore
 
 from app.agent.context import AgentContext
+from app.agent.middleware import UserProfileMiddleware
 from app.agent.models import default_model_factory
 from app.agent.nodes import (
     make_evaluator_node,
@@ -66,6 +67,8 @@ def build_agent(
         model=chat_model,
         tools=all_tools,
         system_prompt=SYSTEM_PROMPT,
+        # 意味記憶 (プロファイル) をターン開始時に System へ動的注入する。
+        middleware=[UserProfileMiddleware(store)],
         context_schema=AgentContext,
         store=store,
         name="responder",
@@ -84,10 +87,10 @@ def build_agent(
     g = StateGraph(AgentGraphState, context_schema=AgentContext)
     g.add_node("orchestrator", make_orchestrator_node(control_model, settings))
     g.add_node("responder", responder_agent)
-    g.add_node("planner", make_planner_node(control_model, all_tools, settings))
+    g.add_node("planner", make_planner_node(control_model, all_tools, settings, store))
     g.add_node("executor", make_executor_node(executor_agent, settings))
     g.add_node("evaluator", make_evaluator_node(control_model, settings))
-    g.add_node("synthesizer", make_synthesizer_node(synth_model, settings))
+    g.add_node("synthesizer", make_synthesizer_node(synth_model, settings, store))
 
     g.add_edge(START, "orchestrator")
     g.add_conditional_edges(

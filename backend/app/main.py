@@ -1,7 +1,7 @@
 """FastAPI アプリケーションファクトリ。"""
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +11,10 @@ from app.core.config import Settings, get_settings
 from app.core.db import build_pool, ensure_threads_table, init_persistence
 from app.core.state import AppState
 from app.mcp.loader import build_mcp_client, get_mcp_tools, load_mcp_config
-from app.memory.manager import build_reflection_executor
+from app.memory.manager import (
+    build_profile_reflection_executor,
+    build_reflection_executor,
+)
 from app.memory.tools import langmem_hotpath_tools
 from app.routers import chat, health, memory, threads, tools
 from app.tools.registry import build_registry
@@ -30,11 +33,13 @@ ROUTERS = (
 )
 
 
-async def _build_dependencies(pool, settings: Settings) -> AppState:
+async def _build_dependencies(
+    pool, settings: Settings, stack: AsyncExitStack
+) -> AppState:
     """開いた pool 上に永続化・レジストリ・MCP・エージェント・executor を組み立てる。
 
-    pool の open/close と executor の shutdown は呼び出し側 (lifespan) が管理する。
-    ここでは構築のみを担い、結果を型付きの AppState として返す。
+    pool の open/close は呼び出し側 (lifespan) が stack に登録済み。ここでは生成した
+    executor の shutdown を生成直後に stack へ登録し、解放順序とリークを構造的に保証する。
     """
     checkpointer, store = await init_persistence(pool, settings)
     await ensure_threads_table(pool)
@@ -62,6 +67,11 @@ async def _build_dependencies(pool, settings: Settings) -> AppState:
         store=store,
     )
     reflection_executor = build_reflection_executor(store, settings)
+    stack.callback(reflection_executor.shutdown, wait=False, cancel_futures=True)
+    profile_reflection_executor = build_profile_reflection_executor(store, settings)
+    stack.callback(
+        profile_reflection_executor.shutdown, wait=False, cancel_futures=True
+    )
 
     tool_info = (
         registry.describe()
@@ -81,6 +91,7 @@ async def _build_dependencies(pool, settings: Settings) -> AppState:
         agent=agent,
         mcp_client=mcp_client,
         reflection_executor=reflection_executor,
+        profile_reflection_executor=profile_reflection_executor,
         tool_info=tool_info,
     )
 
@@ -95,18 +106,13 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    state: AppState | None = None
-    pool = build_pool(settings.database_url)
-    await pool.open()
-    try:
-        state = await _build_dependencies(pool, settings)
-        app.state.deps = state
+    # AsyncExitStack が取得の逆順 (executor → pool) で解放する。途中で失敗しても
+    # その時点までに登録済みのリソースだけが巻き戻るので、手動の None ガードは不要。
+    async with AsyncExitStack() as stack:
+        pool = build_pool(settings.database_url)
+        await stack.enter_async_context(pool)  # __aenter__/__aexit__ が open/close
+        app.state.deps = await _build_dependencies(pool, settings, stack)
         yield
-    finally:
-        # 起動が途中で失敗しても必ず後片付けする (executor → pool の順)
-        if state is not None and state.reflection_executor is not None:
-            state.reflection_executor.shutdown(wait=False, cancel_futures=True)
-        await pool.close()
 
 
 def _configure_cors(app: FastAPI, settings: Settings) -> None:

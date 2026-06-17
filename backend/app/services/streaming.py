@@ -41,6 +41,7 @@ async def stream_agent(
     agent,
     pool,
     reflection_executor,
+    profile_reflection_executor=None,
     message: str,
     thread_id: str,
     user_id: str,
@@ -197,3 +198,13 @@ async def stream_agent(
                 messages=reflection_messages,
                 after_seconds=reflection_delay_seconds,
             )
+            # 意味記憶 (プロファイル) も同じ会話・thread_id で並走スケジュールする。
+            # debounce は executor ごとに thread_id 単位で効く。
+            if profile_reflection_executor is not None:
+                schedule_reflection(
+                    profile_reflection_executor,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    messages=reflection_messages,
+                    after_seconds=reflection_delay_seconds,
+                )

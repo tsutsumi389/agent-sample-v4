@@ -10,7 +10,7 @@ from app.agent.nodes.planner import make_planner_node
 from app.agent.nodes.synthesizer import make_synthesizer_node
 from app.agent.parsing import PlanSchema, RouteSchema, VerdictSchema
 from app.core.config import Settings
-from tests.fakes import ScriptedExecutorAgent, ScriptedModel, StructuredModel
+from tests.fakes import FakeStore, ScriptedExecutorAgent, ScriptedModel, StructuredModel
 
 SETTINGS = Settings()
 OPENAI_SETTINGS = Settings(llm_provider="openai", openai_api_key="x")
@@ -119,7 +119,7 @@ async def test_orchestrator_resets_scratch():
 
 async def test_planner_builds_plan():
     model = ScriptedModel(['{"steps": ["天気を調べる", "比較表を作る"]}'])
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["天気を調べる", "比較表を作る"]
     # 旧形式 (list[str]) は依存なしの並列ステップとして取り込まれる
@@ -144,7 +144,7 @@ async def test_planner_builds_dependency_dag():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["depends_on"] for s in out["plan"]] == [[], [], [1, 2]]
 
@@ -163,7 +163,7 @@ async def test_planner_structured_output_openai_remaps_and_sanitizes():
             )
         ]
     )
-    node = make_planner_node(model, [], OPENAI_SETTINGS)
+    node = make_planner_node(model, [], OPENAI_SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["id"] for s in out["plan"]] == [1, 2]  # 元 id 10/20 → 出現順 1/2 へリマップ
     assert [s["depends_on"] for s in out["plan"]] == [[], [1]]
@@ -181,7 +181,7 @@ async def test_planner_remaps_zero_based_and_sparse_ids():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["id"] for s in out["plan"]] == [1, 2, 3]
     # 0→1, 10→2, 20→3 にリマップされ、依存関係が保存される
@@ -200,7 +200,7 @@ async def test_planner_remaps_deps_when_middle_step_dropped():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["A", "C", "D"]
     # A=1, C=2, D=3。C→A(1) と D→C(2) の依存が正しく保存される
@@ -219,7 +219,7 @@ async def test_planner_sanitizes_invalid_and_cyclic_deps():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     deps = {s["id"]: s["depends_on"] for s in out["plan"]}
     assert deps[1] == []  # 範囲外 99 は除去
@@ -231,14 +231,14 @@ async def test_planner_sanitizes_invalid_and_cyclic_deps():
 async def test_planner_truncates_to_max_steps():
     steps = [f"手順{i}" for i in range(1, 9)]
     model = ScriptedModel([f'{{"steps": {steps}}}'.replace("'", '"')])
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert len(out["plan"]) == SETTINGS.max_plan_steps
 
 
 async def test_planner_falls_back_to_single_step_plan():
     model = ScriptedModel(["壊れた出力", "また壊れた出力"])
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == [LONG_GOAL]
     assert out["plan"][0]["depends_on"] == []
@@ -246,7 +246,7 @@ async def test_planner_falls_back_to_single_step_plan():
 
 async def test_planner_replan_increments_count_and_includes_failures():
     model = ScriptedModel(['{"steps": ["やり直す"]}'])
-    node = make_planner_node(model, [], SETTINGS)
+    node = make_planner_node(model, [], SETTINGS, FakeStore())
     state = {
         "goal": LONG_GOAL,
         "plan": [_step("旧ステップ", result="旧結果", status="done")],
@@ -493,7 +493,7 @@ async def test_evaluator_survives_unexpected_exception_in_round():
 
 async def test_synthesizer_returns_ai_message():
     model = ScriptedModel(["最終回答です"])
-    node = make_synthesizer_node(model, SETTINGS)
+    node = make_synthesizer_node(model, SETTINGS, FakeStore())
     state = {"goal": LONG_GOAL, "plan": [_step(result="結果A", status="done")]}
     out = await node(state, {})
     assert isinstance(out["messages"][0], AIMessage)
@@ -502,7 +502,7 @@ async def test_synthesizer_returns_ai_message():
 
 async def test_synthesizer_separates_system_and_user_roles():
     model = ScriptedModel(["最終回答です"])
-    node = make_synthesizer_node(model, SETTINGS)
+    node = make_synthesizer_node(model, SETTINGS, FakeStore())
     state = {"goal": LONG_GOAL, "plan": [_step("天気を調べる", result="晴れ", status="done")]}
     await node(state, {})
     system, human = model.calls[0]
@@ -514,7 +514,7 @@ async def test_synthesizer_separates_system_and_user_roles():
 
 async def test_synthesizer_falls_back_to_mechanical_concat():
     model = ScriptedModel([RuntimeError("生成失敗")])
-    node = make_synthesizer_node(model, SETTINGS)
+    node = make_synthesizer_node(model, SETTINGS, FakeStore())
     state = {
         "goal": LONG_GOAL,
         "plan": [_step("天気を調べる", result="晴れ", status="done")],

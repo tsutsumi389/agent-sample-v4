@@ -30,6 +30,7 @@ async def chat_stream(
         agent=state.agent,
         pool=state.pool,
         reflection_executor=state.reflection_executor,
+        profile_reflection_executor=state.profile_reflection_executor,
         message=body.message,
         thread_id=body.thread_id,
         user_id=body.user_id,
