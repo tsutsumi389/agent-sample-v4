@@ -11,7 +11,10 @@ from app.core.config import Settings, get_settings
 from app.core.db import build_pool, ensure_threads_table, init_persistence
 from app.core.state import AppState
 from app.mcp.loader import build_mcp_client, get_mcp_tools, load_mcp_config
-from app.memory.manager import build_reflection_executor
+from app.memory.manager import (
+    build_profile_reflection_executor,
+    build_reflection_executor,
+)
 from app.memory.tools import langmem_hotpath_tools
 from app.routers import chat, health, memory, threads, tools
 from app.tools.registry import build_registry
@@ -62,6 +65,7 @@ async def _build_dependencies(pool, settings: Settings) -> AppState:
         store=store,
     )
     reflection_executor = build_reflection_executor(store, settings)
+    profile_reflection_executor = build_profile_reflection_executor(store, settings)
 
     tool_info = (
         registry.describe()
@@ -81,6 +85,7 @@ async def _build_dependencies(pool, settings: Settings) -> AppState:
         agent=agent,
         mcp_client=mcp_client,
         reflection_executor=reflection_executor,
+        profile_reflection_executor=profile_reflection_executor,
         tool_info=tool_info,
     )
 
@@ -106,6 +111,8 @@ async def lifespan(app: FastAPI):
         # 起動が途中で失敗しても必ず後片付けする (executor → pool の順)
         if state is not None and state.reflection_executor is not None:
             state.reflection_executor.shutdown(wait=False, cancel_futures=True)
+        if state is not None and state.profile_reflection_executor is not None:
+            state.profile_reflection_executor.shutdown(wait=False, cancel_futures=True)
         await pool.close()
 
 

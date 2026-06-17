@@ -7,18 +7,21 @@ import logging
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.store.base import BaseStore
 
 from app.agent.nodes.common import safe_stream_writer
 from app.agent.parsing import content_to_text
-from app.agent.prompts import SYNTHESIZER_SYSTEM, synthesizer_user
+from app.agent.prompts import SYNTHESIZER_SYSTEM, profile_section, synthesizer_user
 from app.core.config import Settings
+from app.memory.profile import get_profile_text
+from app.memory.tools import _user_id_from_config
 
 logger = logging.getLogger(__name__)
 
 _STATUS_LABEL = {"done": "完了", "failed": "失敗", "running": "中断", "pending": "未着手"}
 
 
-def make_synthesizer_node(model, settings: Settings):
+def make_synthesizer_node(model, settings: Settings, store: BaseStore):
     async def synthesizer_node(state: dict, config: RunnableConfig) -> dict:
         writer = safe_stream_writer()
         writer({"status": "回答を作成中", "phase": "synthesize"})
@@ -39,8 +42,10 @@ def make_synthesizer_node(model, settings: Settings):
             if failure_notes
             else ""
         )
+        # 意味記憶 (プロファイル) を System 末尾へ注入し、最終回答をパーソナライズする。
+        profile_text = await get_profile_text(store, _user_id_from_config(config))
         messages = [
-            SystemMessage(content=SYNTHESIZER_SYSTEM),
+            SystemMessage(content=SYNTHESIZER_SYSTEM + profile_section(profile_text)),
             HumanMessage(
                 content=synthesizer_user(
                     goal=goal, step_summaries=step_summaries, failure_section=failure_section

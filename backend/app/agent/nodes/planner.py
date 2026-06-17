@@ -9,12 +9,20 @@ import logging
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
+from langgraph.store.base import BaseStore
 
 from app.agent.nodes.common import safe_stream_writer, sanitize_dependencies
 from app.agent.parsing import PlanSchema, structured_or_parse
-from app.agent.prompts import PLANNER_REPLAN_SECTION, PLANNER_SYSTEM, planner_user
+from app.agent.prompts import (
+    PLANNER_REPLAN_SECTION,
+    PLANNER_SYSTEM,
+    planner_user,
+    profile_section,
+)
 from app.agent.state import PlanStep
 from app.core.config import Settings
+from app.memory.profile import get_profile_text
+from app.memory.tools import _user_id_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +30,7 @@ _CATALOG_DESC_MAX = 80
 _REPLAN_SUMMARY_MAX = 1500
 
 
-def make_planner_node(model, tools: list[BaseTool], settings: Settings):
+def make_planner_node(model, tools: list[BaseTool], settings: Settings, store: BaseStore):
     catalog = (
         ", ".join(f"{t.name} ({(t.description or '').strip()[:_CATALOG_DESC_MAX]})" for t in tools)
         or "(なし)"
@@ -53,7 +61,11 @@ def make_planner_node(model, tools: list[BaseTool], settings: Settings):
             )
 
         writer({"status": "実行計画を作成中", "phase": "plan"})
-        system = PLANNER_SYSTEM.format(max_steps=settings.max_plan_steps)
+        # 意味記憶 (制約・好み) を System 末尾へ注入し、計画立案=ステップ分解に反映する。
+        profile_text = await get_profile_text(store, _user_id_from_config(config))
+        system = PLANNER_SYSTEM.format(max_steps=settings.max_plan_steps) + profile_section(
+            profile_text
+        )
         user = planner_user(goal=goal, tool_catalog=catalog, replan_section=replan_section)
         parsed = await structured_or_parse(
             model,

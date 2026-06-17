@@ -34,6 +34,8 @@ class AppState:
     agent: Any | None = None
     mcp_client: MultiServerMCPClient | None = None
     reflection_executor: ReflectionExecutor | None = None
+    # 意味記憶 (構造化プロファイル) 統合用。エピソード記憶用と並走する。
+    profile_reflection_executor: ReflectionExecutor | None = None
     tool_info: list[dict] = field(default_factory=list)
 
 
