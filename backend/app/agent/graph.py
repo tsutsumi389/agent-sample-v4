@@ -59,6 +59,9 @@ def build_agent(
     control_model = make("control", settings, ["nostream"])  # orchestrator/planner/evaluator
     synth_model = make("chat", settings, [])  # synthesizer: トークン表出
     exec_model = make("chat", settings, ["nostream"])  # executor: tool_call/result のみ表出
+    # 構造化データ (PlanStep.data) を後続へ渡す前に「必要分だけ」へ絞る選別用。data は大きく
+    # 得るので大コンテキスト側 (chat: num_ctx=32768)。出力は選択指定 JSON のみで表出不要 (nostream)。
+    screen_model = make("chat", settings, ["nostream"])
     all_tools = [*native_tools, *langmem_tools, *mcp_tools]
 
     # 高速パス: 単一エージェント時代と同一の ReAct をノード直付け
@@ -87,10 +90,10 @@ def build_agent(
     g = StateGraph(AgentGraphState, context_schema=AgentContext)
     g.add_node("orchestrator", make_orchestrator_node(control_model, settings))
     g.add_node("responder", responder_agent)
-    g.add_node("planner", make_planner_node(control_model, all_tools, settings, store))
-    g.add_node("executor", make_executor_node(executor_agent, settings))
-    g.add_node("evaluator", make_evaluator_node(control_model, settings))
-    g.add_node("synthesizer", make_synthesizer_node(synth_model, settings, store))
+    g.add_node("planner", make_planner_node(control_model, all_tools, settings, store, screen_model))
+    g.add_node("executor", make_executor_node(executor_agent, settings, screen_model))
+    g.add_node("evaluator", make_evaluator_node(control_model, settings, screen_model))
+    g.add_node("synthesizer", make_synthesizer_node(synth_model, settings, store, screen_model))
 
     g.add_edge(START, "orchestrator")
     g.add_conditional_edges(

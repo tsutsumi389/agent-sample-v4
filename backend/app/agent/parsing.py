@@ -108,6 +108,50 @@ class RouteSchema(BaseModel):
     )
 
 
+class EntrySelectionSchema(BaseModel):
+    """PlanStep.data の 1 エントリ (= 1 ツール出力) に対する「残す箇所」の選択指定。
+
+    LLM は値を生成せず、どのフィールド/項目を残すかだけを指定する。実抽出はコード側
+    (common.apply_data_selection) が元データから射影するため、値は元のまま保たれる。
+    """
+
+    index: int  # data リスト内のエントリ位置 (0 始まり)
+    keep_fields: list[str] = []  # 各 dict で残すキー名 (空 = 全フィールド)
+    keep_items: list[int] | None = None  # artifact が list のとき残す項目位置 (None = 全項目)
+
+    @field_validator("index", mode="before")
+    @classmethod
+    def coerce_index(cls, v: Any) -> int | None:
+        # None を返すと int 必須違反で ValidationError → DataSelectionSchema 側で当該エントリを捨てる
+        return _coerce_opt_int(v)
+
+    @field_validator("keep_fields", mode="before")
+    @classmethod
+    def coerce_keep_fields(cls, v: Any) -> list[str]:
+        return [s for s in v if isinstance(s, str) and s] if isinstance(v, list) else []
+
+    @field_validator("keep_items", mode="before")
+    @classmethod
+    def coerce_keep_items(cls, v: Any) -> list[int] | None:
+        return None if v is None else _coerce_int_list(v)
+
+
+class DataSelectionSchema(BaseModel):
+    """スクリーニングの選択結果 (エントリごとの選択指定の集合)。"""
+
+    selections: list[EntrySelectionSchema] = []
+
+    @field_validator("selections", mode="before")
+    @classmethod
+    def drop_malformed(cls, v: Any) -> list[dict]:
+        # dict 以外や index を欠く要素を捨て、堅牢に拾えるものだけ通す。
+        out: list[dict] = []
+        for item in v if isinstance(v, list) else []:
+            if isinstance(item, dict) and _coerce_opt_int(item.get("index")) is not None:
+                out.append(item)
+        return out
+
+
 def content_to_text(content: Any) -> str:
     """message content (str | list[block]) をプレーンテキストへ。"""
     if isinstance(content, str):

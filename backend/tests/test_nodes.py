@@ -2,18 +2,29 @@
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from app.agent.nodes.common import EXECUTION_FAILED_MARKER
+from app.agent.nodes.common import (
+    EXECUTION_FAILED_MARKER,
+    apply_data_selection,
+    screen_step_data,
+)
 from app.agent.nodes.evaluator import make_evaluator_node
 from app.agent.nodes.executor import make_executor_node
 from app.agent.nodes.orchestrator import make_orchestrator_node
 from app.agent.nodes.planner import make_planner_node
 from app.agent.nodes.synthesizer import make_synthesizer_node
-from app.agent.parsing import PlanSchema, RouteSchema, VerdictSchema
+from app.agent.parsing import DataSelectionSchema, PlanSchema, RouteSchema, VerdictSchema
 from app.core.config import Settings
-from tests.fakes import FakeStore, ScriptedExecutorAgent, ScriptedModel, StructuredModel
+from tests.fakes import (
+    FakeScreenModel,
+    FakeStore,
+    ScriptedExecutorAgent,
+    ScriptedModel,
+    StructuredModel,
+)
 
 SETTINGS = Settings()
 OPENAI_SETTINGS = Settings(llm_provider="openai", openai_api_key="x")
+SCREEN = FakeScreenModel()  # no-op スクリーニング (全量素通り)
 LONG_GOAL = "東京と大阪の明日の天気を調べて、移動手段ごとの所要時間と合わせて比較表にまとめてください"
 
 
@@ -119,7 +130,7 @@ async def test_orchestrator_resets_scratch():
 
 async def test_planner_builds_plan():
     model = ScriptedModel(['{"steps": ["天気を調べる", "比較表を作る"]}'])
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["天気を調べる", "比較表を作る"]
     # 旧形式 (list[str]) は依存なしの並列ステップとして取り込まれる
@@ -144,7 +155,7 @@ async def test_planner_builds_dependency_dag():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["depends_on"] for s in out["plan"]] == [[], [], [1, 2]]
 
@@ -163,7 +174,7 @@ async def test_planner_structured_output_openai_remaps_and_sanitizes():
             )
         ]
     )
-    node = make_planner_node(model, [], OPENAI_SETTINGS, FakeStore())
+    node = make_planner_node(model, [], OPENAI_SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["id"] for s in out["plan"]] == [1, 2]  # 元 id 10/20 → 出現順 1/2 へリマップ
     assert [s["depends_on"] for s in out["plan"]] == [[], [1]]
@@ -181,7 +192,7 @@ async def test_planner_remaps_zero_based_and_sparse_ids():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["id"] for s in out["plan"]] == [1, 2, 3]
     # 0→1, 10→2, 20→3 にリマップされ、依存関係が保存される
@@ -200,7 +211,7 @@ async def test_planner_remaps_deps_when_middle_step_dropped():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["A", "C", "D"]
     # A=1, C=2, D=3。C→A(1) と D→C(2) の依存が正しく保存される
@@ -219,7 +230,7 @@ async def test_planner_sanitizes_invalid_and_cyclic_deps():
             "]}"
         ]
     )
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     deps = {s["id"]: s["depends_on"] for s in out["plan"]}
     assert deps[1] == []  # 範囲外 99 は除去
@@ -231,14 +242,14 @@ async def test_planner_sanitizes_invalid_and_cyclic_deps():
 async def test_planner_truncates_to_max_steps():
     steps = [f"手順{i}" for i in range(1, 9)]
     model = ScriptedModel([f'{{"steps": {steps}}}'.replace("'", '"')])
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert len(out["plan"]) == SETTINGS.max_plan_steps
 
 
 async def test_planner_falls_back_to_single_step_plan():
     model = ScriptedModel(["壊れた出力", "また壊れた出力"])
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == [LONG_GOAL]
     assert out["plan"][0]["depends_on"] == []
@@ -246,7 +257,7 @@ async def test_planner_falls_back_to_single_step_plan():
 
 async def test_planner_replan_increments_count_and_includes_failures():
     model = ScriptedModel(['{"steps": ["やり直す"]}'])
-    node = make_planner_node(model, [], SETTINGS, FakeStore())
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     state = {
         "goal": LONG_GOAL,
         "plan": [_step("旧ステップ", result="旧結果", status="done")],
@@ -270,7 +281,7 @@ async def test_planner_replan_increments_count_and_includes_failures():
 
 async def test_executor_runs_step_and_records_result():
     agent = ScriptedExecutorAgent(["<think>作業中</think>調査結果です"])
-    node = make_executor_node(agent, SETTINGS)
+    node = make_executor_node(agent, SETTINGS, SCREEN)
     state = {"goal": LONG_GOAL, "plan": [_step()], "executor_runs": 0}
     out = await node(state, {"configurable": {"thread_id": "t1"}})
     assert out["plan"][0]["result"] == "調査結果です"
@@ -284,7 +295,7 @@ async def test_executor_runs_step_and_records_result():
 
 async def test_executor_runs_independent_steps_in_parallel():
     agent = ScriptedExecutorAgent(["結果A", "結果B", "結果C"])
-    node = make_executor_node(agent, SETTINGS)  # max_parallel_executors=3
+    node = make_executor_node(agent, SETTINGS, SCREEN)  # max_parallel_executors=3
     plan = [
         _step("A", id=1),
         _step("B", id=2),
@@ -300,7 +311,7 @@ async def test_executor_runs_independent_steps_in_parallel():
 async def test_executor_respects_parallel_cap():
     agent = ScriptedExecutorAgent(["1", "2", "3", "4", "5"])
     settings = Settings(max_parallel_executors=2)
-    node = make_executor_node(agent, settings)
+    node = make_executor_node(agent, settings, SCREEN)
     plan = [_step(f"S{i}", id=i) for i in range(1, 5)]  # 依存なし4ステップ
     out = await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
     # 1ラウンドでは上限2件だけ実行される (残りは次ラウンド)
@@ -311,7 +322,7 @@ async def test_executor_respects_parallel_cap():
 
 async def test_executor_skips_steps_with_unmet_dependencies():
     agent = ScriptedExecutorAgent(["Aの結果"])
-    node = make_executor_node(agent, SETTINGS)
+    node = make_executor_node(agent, SETTINGS, SCREEN)
     plan = [
         _step("A", id=1),  # 依存なし → 実行可能
         _step("B", id=2, depends_on=[1]),  # 1 が未 done → 実行されない
@@ -324,7 +335,7 @@ async def test_executor_skips_steps_with_unmet_dependencies():
 
 async def test_executor_passes_dependency_results_in_prompt():
     agent = ScriptedExecutorAgent(["統合完了"])
-    node = make_executor_node(agent, SETTINGS)
+    node = make_executor_node(agent, SETTINGS, SCREEN)
     plan = [
         _step("A", id=1, result="Aの成果", status="done"),
         _step("統合", id=2, depends_on=[1]),
@@ -336,7 +347,7 @@ async def test_executor_passes_dependency_results_in_prompt():
 
 async def test_executor_never_raises_on_agent_failure():
     agent = ScriptedExecutorAgent([RuntimeError("ツール大爆発")])
-    node = make_executor_node(agent, SETTINGS)
+    node = make_executor_node(agent, SETTINGS, SCREEN)
     state = {"goal": LONG_GOAL, "plan": [_step()]}
     out = await node(state, {})
     assert out["plan"][0]["result"].startswith(EXECUTION_FAILED_MARKER)
@@ -344,7 +355,7 @@ async def test_executor_never_raises_on_agent_failure():
 
 async def test_executor_without_ready_steps_still_advances_runs():
     agent = ScriptedExecutorAgent([])
-    node = make_executor_node(agent, SETTINGS)
+    node = make_executor_node(agent, SETTINGS, SCREEN)
     out = await node({"plan": [], "executor_runs": 2}, {})
     assert out == {"executor_runs": 3}
 
@@ -359,7 +370,7 @@ def _running(**kw) -> dict:
 
 async def test_evaluator_empty_result_retries_without_llm():
     model = ScriptedModel([])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "pending"  # retry → 再実行待ち
@@ -368,7 +379,7 @@ async def test_evaluator_empty_result_retries_without_llm():
 
 async def test_evaluator_pass_marks_done():
     model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="良い結果", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "done"
@@ -376,7 +387,7 @@ async def test_evaluator_pass_marks_done():
 
 async def test_evaluator_structured_output_openai_pass():
     model = StructuredModel([VerdictSchema(verdict="pass", feedback="")])
-    node = make_evaluator_node(model, OPENAI_SETTINGS)
+    node = make_evaluator_node(model, OPENAI_SETTINGS, SCREEN)
     state = {"plan": [_running(result="良い結果", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "done"
@@ -385,7 +396,7 @@ async def test_evaluator_structured_output_openai_pass():
 
 async def test_evaluator_structured_output_openai_retry():
     model = StructuredModel([VerdictSchema(verdict="retry", feedback="具体性が不足")])
-    node = make_evaluator_node(model, OPENAI_SETTINGS)
+    node = make_evaluator_node(model, OPENAI_SETTINGS, SCREEN)
     state = {"plan": [_running(result="不十分", attempts=0)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "pending"
@@ -394,7 +405,7 @@ async def test_evaluator_structured_output_openai_retry():
 
 async def test_evaluator_separates_system_and_user_roles():
     model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(desc="天気を調べる", result="晴れだった", attempts=1)]}
     await node(state, {})
     system, human = model.calls[0]
@@ -407,7 +418,7 @@ async def test_evaluator_separates_system_and_user_roles():
 
 async def test_evaluator_retry_sets_feedback_and_pends():
     model = ScriptedModel(['{"verdict": "retry", "feedback": "もっと具体的に"}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="不十分", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "pending"
@@ -416,7 +427,7 @@ async def test_evaluator_retry_sets_feedback_and_pends():
 
 async def test_evaluator_retry_budget_downgrades_to_fail():
     model = ScriptedModel(['{"verdict": "retry", "feedback": "もう一度"}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     # attempts=2 > max_step_retries=1 → fail に格下げして前進
     state = {"plan": [_running(result="不十分", attempts=2)]}
     out = await node(state, {})
@@ -426,7 +437,7 @@ async def test_evaluator_retry_budget_downgrades_to_fail():
 
 async def test_evaluator_replan_sets_needs_replan():
     model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="ずれた結果", attempts=1)], "replan_count": 0}
     out = await node(state, {})
     assert out["needs_replan"] is True
@@ -435,7 +446,7 @@ async def test_evaluator_replan_sets_needs_replan():
 
 async def test_evaluator_replan_budget_downgrades_to_fail():
     model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {
         "plan": [_running(result="ずれた結果", attempts=1)],
         "replan_count": SETTINGS.max_replans,
@@ -450,7 +461,7 @@ async def test_evaluator_evaluates_round_in_parallel():
     model = ScriptedModel(
         ['{"verdict": "pass", "feedback": ""}', '{"verdict": "pass", "feedback": ""}']
     )
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     plan = [
         _running(id=1, result="結果1", attempts=1),
         _running(id=2, result="結果2", attempts=1),
@@ -462,7 +473,7 @@ async def test_evaluator_evaluates_round_in_parallel():
 
 async def test_evaluator_ignores_non_running_steps():
     model = ScriptedModel([])  # 評価対象がなければ LLM は呼ばれない
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_step(result="x", status="done"), _step(status="pending")]}
     out = await node(state, {})
     assert out == {}
@@ -471,7 +482,7 @@ async def test_evaluator_ignores_non_running_steps():
 
 async def test_evaluator_parse_failure_falls_back_to_pass():
     model = ScriptedModel(["壊れた出力", "また壊れた出力"])
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="それなりの結果", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "done"
@@ -481,7 +492,7 @@ async def test_evaluator_survives_unexpected_exception_in_round():
     """eval_one 内で想定外例外 (ここでは description キー欠落) が出ても、gather が node 全体を
     巻き込まず pass で前進する (executor.run_one と対称な「例外を漏らさない」契約)。"""
     model = ScriptedModel([])  # LLM 到達前に例外が出るので呼ばれない
-    node = make_evaluator_node(model, SETTINGS)
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
     broken = {"id": 1, "depends_on": [], "status": "running", "result": "x", "attempts": 1}
     out = await node({"plan": [broken]}, {})
     assert out["plan"][0]["status"] == "done"  # pass フォールバックで確定
@@ -493,7 +504,7 @@ async def test_evaluator_survives_unexpected_exception_in_round():
 
 async def test_synthesizer_returns_ai_message():
     model = ScriptedModel(["最終回答です"])
-    node = make_synthesizer_node(model, SETTINGS, FakeStore())
+    node = make_synthesizer_node(model, SETTINGS, FakeStore(), SCREEN)
     state = {"goal": LONG_GOAL, "plan": [_step(result="結果A", status="done")]}
     out = await node(state, {})
     assert isinstance(out["messages"][0], AIMessage)
@@ -502,7 +513,7 @@ async def test_synthesizer_returns_ai_message():
 
 async def test_synthesizer_separates_system_and_user_roles():
     model = ScriptedModel(["最終回答です"])
-    node = make_synthesizer_node(model, SETTINGS, FakeStore())
+    node = make_synthesizer_node(model, SETTINGS, FakeStore(), SCREEN)
     state = {"goal": LONG_GOAL, "plan": [_step("天気を調べる", result="晴れ", status="done")]}
     await node(state, {})
     system, human = model.calls[0]
@@ -514,7 +525,7 @@ async def test_synthesizer_separates_system_and_user_roles():
 
 async def test_synthesizer_falls_back_to_mechanical_concat():
     model = ScriptedModel([RuntimeError("生成失敗")])
-    node = make_synthesizer_node(model, SETTINGS, FakeStore())
+    node = make_synthesizer_node(model, SETTINGS, FakeStore(), SCREEN)
     state = {
         "goal": LONG_GOAL,
         "plan": [_step("天気を調べる", result="晴れ", status="done")],
@@ -525,3 +536,80 @@ async def test_synthesizer_falls_back_to_mechanical_concat():
     assert "天気を調べる" in text
     assert "晴れ" in text
     assert "ステップ2: 未達成" in text
+
+
+# ---- screening (構造化データの絞り込み) ----
+
+_NEWS_DATA = [
+    {
+        "tool": "news_search",
+        "artifact": [
+            {"id": "n001", "title": "A", "summary": "sa", "url": "ua", "body": "ba"},
+            {"id": "n002", "title": "B", "summary": "sb", "url": "ub", "body": "bb"},
+            {"id": "n003", "title": "C", "summary": "sc", "url": "uc", "body": "bc"},
+        ],
+    }
+]
+
+
+def test_apply_data_selection_projects_fields_keeping_values():
+    # keep_fields 指定 → 各 dict が id/title だけになり、値は元のまま (書き換えない)
+    sel = DataSelectionSchema(selections=[{"index": 0, "keep_fields": ["id", "title"]}])
+    out = apply_data_selection(_NEWS_DATA, sel)
+    assert out == [
+        {
+            "tool": "news_search",
+            "artifact": [
+                {"id": "n001", "title": "A"},
+                {"id": "n002", "title": "B"},
+                {"id": "n003", "title": "C"},
+            ],
+        }
+    ]
+
+
+def test_apply_data_selection_filters_items_and_ignores_out_of_range():
+    # keep_items で上位2件のみ + 範囲外 index(99) と未知フィールド(nope) は無視
+    sel = DataSelectionSchema(
+        selections=[{"index": 0, "keep_fields": ["id", "nope"], "keep_items": [0, 1, 99]}]
+    )
+    out = apply_data_selection(_NEWS_DATA, sel)
+    assert out == [{"tool": "news_search", "artifact": [{"id": "n001"}, {"id": "n002"}]}]
+
+
+def test_apply_data_selection_empty_selection_returns_full():
+    # 空選択 → 全量フォールバック (誤って全ドロップしない)
+    assert apply_data_selection(_NEWS_DATA, DataSelectionSchema(selections=[])) == _NEWS_DATA
+
+
+def test_apply_data_selection_unlisted_entry_dropped_else_full_fallback():
+    multi = [
+        {"tool": "a", "artifact": [{"x": 1}]},
+        {"tool": "b", "artifact": [{"y": 2}]},
+    ]
+    # index 1 のみ選択 → エントリ0 はドロップ
+    out = apply_data_selection(multi, DataSelectionSchema(selections=[{"index": 1}]))
+    assert out == [{"tool": "b", "artifact": [{"y": 2}]}]
+
+
+async def test_screen_step_data_applies_llm_selection():
+    # LLM が選択指定 JSON を返す → コードが決定論的に射影 (値は LLM 由来でなく元データ)
+    model = ScriptedModel(['{"selections": [{"index": 0, "keep_fields": ["id"]}]}'])
+    out = await screen_step_data(model, _NEWS_DATA, purpose="記事IDだけ必要", settings=SETTINGS)
+    assert out == [
+        {"tool": "news_search", "artifact": [{"id": "n001"}, {"id": "n002"}, {"id": "n003"}]}
+    ]
+
+
+async def test_screen_step_data_empty_skips_llm():
+    model = ScriptedModel([])  # 呼ばれたら raise
+    assert await screen_step_data(model, None, purpose="x", settings=SETTINGS) is None
+    assert await screen_step_data(model, [], purpose="x", settings=SETTINGS) == []
+    assert model.calls == []
+
+
+async def test_screen_step_data_falls_back_to_full_on_failure():
+    # 選択取得が全滅 (空スクリプトで例外) → 全量フォールバック (前進性)
+    model = ScriptedModel([RuntimeError("接続断"), RuntimeError("接続断")])
+    out = await screen_step_data(model, _NEWS_DATA, purpose="x", settings=SETTINGS)
+    assert out == _NEWS_DATA

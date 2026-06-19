@@ -4,6 +4,7 @@
 JSON パース全滅時は単一ステップ計画 [goal] に縮退し、必ず前進する。
 """
 
+import asyncio
 import logging
 
 from langchain_core.runnables import RunnableConfig
@@ -11,7 +12,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.store.base import BaseStore
 
-from app.agent.nodes.common import safe_stream_writer, sanitize_dependencies
+from app.agent.nodes.common import (
+    format_step_data,
+    safe_stream_writer,
+    sanitize_dependencies,
+    screen_step_data,
+)
 from app.agent.parsing import PlanSchema, structured_or_parse
 from app.agent.prompts import (
     PLANNER_REPLAN_SECTION,
@@ -30,7 +36,9 @@ _CATALOG_DESC_MAX = 80
 _REPLAN_SUMMARY_MAX = 1500
 
 
-def make_planner_node(model, tools: list[BaseTool], settings: Settings, store: BaseStore):
+def make_planner_node(
+    model, tools: list[BaseTool], settings: Settings, store: BaseStore, screen_model
+):
     catalog = (
         ", ".join(f"{t.name} ({(t.description or '').strip()[:_CATALOG_DESC_MAX]})" for t in tools)
         or "(なし)"
@@ -44,19 +52,31 @@ def make_planner_node(model, tools: list[BaseTool], settings: Settings, store: B
 
         replan_section = ""
         if is_replan:
+            done_steps = [s for s in prev_plan if s.get("status") == "done"]
             done = (
                 " / ".join(
-                    f"{s['description'][:100]} → {s.get('result', '')[:200]}"
-                    for s in prev_plan
-                    if s.get("status") == "done"
+                    f"{s['description'][:100]} → {s.get('result', '')[:200]}" for s in done_steps
                 )
                 or "(なし)"
             )
+            # result(テキスト) は _REPLAN_SUMMARY_MAX で切り詰めるが、構造化データ (artifact) は
+            # 機械処理用のため切り詰めない。再計画に必要な分だけへ絞ってから (値は変えず選別のみ) 別途付ける。
+            done_summaries = done[:_REPLAN_SUMMARY_MAX]
+            screened = await asyncio.gather(
+                *(screen_step_data(screen_model, s.get("data"), purpose=goal, settings=settings) for s in done_steps)
+            )
+            data_blocks = [
+                f"ステップ{s['id']} のデータ: {dt}"
+                for s, d in zip(done_steps, screened)
+                if (dt := format_step_data(d))
+            ]
+            if data_blocks:
+                done_summaries += "\n構造化データ:\n" + "\n".join(data_blocks)
             # 評価者の retry/replan feedback は failure_notes に「ステップ名: 指摘」として
             # 取り込まれているため、replan の理由はここに一本化する。
             notes = " / ".join(state.get("failure_notes") or []) or "(なし)"
             replan_section = PLANNER_REPLAN_SECTION.format(
-                done_summaries=done[:_REPLAN_SUMMARY_MAX],
+                done_summaries=done_summaries,
                 failure_notes=notes[:_REPLAN_SUMMARY_MAX],
             )
 

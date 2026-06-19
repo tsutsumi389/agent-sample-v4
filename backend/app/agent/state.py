@@ -26,9 +26,16 @@ class PlanStep(TypedDict):
     description: str  # 実行タスク (自然文)
     depends_on: list[int]  # 先行ステップ ID 群 (全て done で実行可能 / 空なら即時実行可)
     status: Literal["pending", "running", "done", "failed"]
-    result: str  # 実行結果要約 (step_result_max_chars で切詰め済み)
+    result: str  # 実行結果要約 (step_result_max_chars で切詰め済み / LLM・人間向けテキスト)
     attempts: int  # このステップの executor 実行回数
     feedback: str  # retry 時に評価者が残す、このステップ専用の改善指示
+    # ツール (content_and_artifact 形式) が返した構造化データの回収先。executor が
+    # ReAct 実行中の ToolMessage.artifact を集めてここへ格納する。後続ノードは result
+    # (テキスト要約) に加え、機械処理用にこちらも読む (executor の依存渡し / evaluator /
+    # synthesizer / planner 再計画)。切り詰めると不正確になるため全量を保持し、後続へ渡す際は
+    # 各エージェントが必要な分だけを LLM スクリーニングで抜き出す (common.screen_step_data。
+    # 値は変えず選別のみ)。整形は common.format_step_data。各要素は {"tool", "artifact"}。
+    data: NotRequired[list[dict]]
 
 
 class AgentGraphState(TypedDict):

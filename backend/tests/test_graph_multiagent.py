@@ -13,12 +13,14 @@ from app.core.config import Settings
 LONG_GOAL = "東京と大阪の明日の天気を調べて、移動手段ごとの所要時間と合わせて比較表にまとめてください"
 
 
-def _fake_factory(*, control, responder, synthesizer, executor):
-    """kind と tags でフェイクを配る (nostream 付き chat = executor、なし = responder→synthesizer 順)。
+def _fake_factory(*, control, responder, synthesizer, executor, screen=None):
+    """kind と tags でフェイクを配る。
 
-    呼び出し列は factory.calls に記録され、nostream タグの配線リグレッションを検出できる。
+    nostream なし chat = responder→synthesizer 順、nostream 付き chat = executor→screen 順
+    (生成順に対応)。呼び出し列は factory.calls に記録され、nostream 配線リグレッションを検出できる。
     """
     untagged_chat = [responder, synthesizer]
+    nostream_chat = [executor, screen if screen is not None else GenericFakeChatModel(messages=iter([]))]
     calls: list[tuple[str, tuple[str, ...]]] = []
 
     def factory(kind, settings, tags):
@@ -26,7 +28,7 @@ def _fake_factory(*, control, responder, synthesizer, executor):
         if kind == "control":
             return control
         if "nostream" in tags:
-            return executor
+            return nostream_chat.pop(0)
         return untagged_chat.pop(0)
 
     factory.calls = calls
@@ -64,6 +66,7 @@ def test_nostream_tag_wiring():
         ("control", ("nostream",)),  # orchestrator/planner/evaluator
         ("chat", ()),  # synthesizer: トークン表出
         ("chat", ("nostream",)),  # executor
+        ("chat", ("nostream",)),  # screen: 構造化データ選別 (内部処理のため nostream)
     ]
 
 

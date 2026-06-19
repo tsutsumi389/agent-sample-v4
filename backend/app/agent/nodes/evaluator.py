@@ -14,7 +14,12 @@ import logging
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.agent.nodes.common import EXECUTION_FAILED_MARKER, safe_stream_writer
+from app.agent.nodes.common import (
+    EXECUTION_FAILED_MARKER,
+    format_step_data,
+    safe_stream_writer,
+    screen_step_data,
+)
 from app.agent.parsing import VerdictSchema, structured_or_parse
 from app.agent.prompts import EVALUATOR_SYSTEM, evaluator_user
 from app.core.config import Settings
@@ -22,7 +27,7 @@ from app.core.config import Settings
 logger = logging.getLogger(__name__)
 
 
-def make_evaluator_node(model, settings: Settings):
+def make_evaluator_node(model, settings: Settings, screen_model):
     async def evaluator_node(state: dict, config: RunnableConfig) -> dict:
         plan = [dict(s) for s in state.get("plan") or []]
         running = [i for i, s in enumerate(plan) if s.get("status") == "running"]
@@ -46,6 +51,13 @@ def make_evaluator_node(model, settings: Settings):
                         "前回の実行が失敗または空の結果でした。別のアプローチで再実行してください。",
                     )
                 else:
+                    # 構造化データは判定に必要な分だけへ絞ってから補助材料として渡す (値は変えず選別のみ)。
+                    screened = await screen_step_data(
+                        screen_model,
+                        step.get("data"),
+                        purpose=f"ステップ「{step['description']}」の実行結果が目的を達成しているかの評価",
+                        settings=settings,
+                    )
                     parsed = await structured_or_parse(
                         model,
                         [
@@ -54,6 +66,7 @@ def make_evaluator_node(model, settings: Settings):
                                 content=evaluator_user(
                                     step_description=step["description"],
                                     result=result,
+                                    data=format_step_data(screened),
                                 )
                             ),
                         ],
