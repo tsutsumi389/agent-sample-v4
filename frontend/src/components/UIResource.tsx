@@ -215,6 +215,72 @@ function FormView({ props, onAction }: ViewProps) {
   );
 }
 
+// ---- news (ニュース専用カード一覧) ----
+const newsArticleSchema = z.object({
+  id: z.string().optional(),
+  title: z.string(),
+  summary: z.string().optional().default(""),
+  source: z.string().optional(),
+  published: z.string().optional(),
+  category: z.string().optional(),
+  url: z.string().optional(),
+  body: z.string().optional(),
+});
+const newsSchema = z.object({
+  title: z.string().optional(),
+  articles: z.array(newsArticleSchema),
+});
+
+// LLM/MCP 由来の url は javascript: 等の危険スキームを含み得る。http(s) のみ許可し、
+// それ以外はリンク化せずタイトルを素のテキストで描く (XSS 面を断つ)。
+function safeHttpUrl(url: string | undefined): string | undefined {
+  return url && /^https?:\/\//i.test(url) ? url : undefined;
+}
+
+function NewsView({ props }: ViewProps) {
+  const r = newsSchema.safeParse(props);
+  if (!r.success) return <FallbackNote reason="news の props 形式が不正です" />;
+  const { title, articles } = r.data;
+  return (
+    <div className="ui-news">
+      {title && <div className="ui-title">{title}</div>}
+      {articles.length === 0 ? (
+        <p className="ui-news-empty">該当するニュースはありません。</p>
+      ) : (
+        <ul className="ui-news-list">
+          {articles.map((a, i) => {
+            const href = safeHttpUrl(a.url);
+            return (
+            <li className="ui-news-item" key={a.id ?? i}>
+              <div className="ui-news-meta">
+                {a.category && <span className="ui-news-cat">{a.category}</span>}
+                {a.source && <span>{a.source}</span>}
+                {a.published && (
+                  <time className="ui-news-date">{a.published}</time>
+                )}
+              </div>
+              <div className="ui-news-headline">
+                {href ? (
+                  // 外部リンクは新規タブ + noopener (タブナビング対策)。href は
+                  // http(s) のみ (safeHttpUrl で javascript: 等の危険スキームを除外)。
+                  <a href={href} target="_blank" rel="noopener noreferrer">
+                    {a.title}
+                  </a>
+                ) : (
+                  a.title
+                )}
+              </div>
+              {a.summary && <p className="ui-news-summary">{a.summary}</p>}
+              {a.body && <p className="ui-news-body">{a.body}</p>}
+            </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function FallbackNote({ reason }: { reason: string }) {
   return <div className="ui-fallback">表示できません: {reason}</div>;
 }
@@ -224,6 +290,7 @@ const REGISTRY: Record<string, React.FC<ViewProps>> = {
   chart: ChartView,
   card: CardView,
   form: FormView,
+  news: NewsView,
 };
 
 interface Props {

@@ -54,6 +54,34 @@ class StructuredModel:
         return out
 
 
+class _BoundEmptySelection:
+    """with_structured_output 経由で空選択スキーマを返す薄いラッパ。"""
+
+    def __init__(self, schema: Any) -> None:
+        self.schema = schema
+
+    async def ainvoke(self, messages: Any, config: Any = None) -> Any:
+        return self.schema()  # DataSelectionSchema() = selections 既定 [] (=全量フォールバック)
+
+
+class FakeScreenModel:
+    """スクリーニング用の no-op フェイク。常に空選択を返す → 全量素通り (既存挙動を変えない)。
+
+    text 経路 (ainvoke) は空選択 JSON、structured 経路 (with_structured_output) は空スキーマを返す。
+    data があっても screen_step_data は全量を返すため、スクリーニング非対象テストに影響しない。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> "_BoundEmptySelection":
+        return _BoundEmptySelection(schema)
+
+    async def ainvoke(self, messages: Any, config: Any = None) -> AIMessage:
+        self.calls.append(messages)
+        return AIMessage(content='{"selections": []}')
+
+
 class ScriptedExecutorAgent:
     """executor_agent.ainvoke のフェイク。スクリプトの文字列を最終 AIMessage として返す。"""
 
