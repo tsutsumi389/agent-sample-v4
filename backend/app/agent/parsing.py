@@ -48,12 +48,18 @@ class PlanStepSchema(BaseModel):
     # リマップする際の対応付けに使う。欠落・不正なら None (出現位置で代替)。
     id: int | None = None
     description: str
+    instruction: str = ""  # executor 向けの具体的・パーソナライズ済み実行手順 (任意)
     depends_on: list[int] = []
 
     @field_validator("id", mode="before")
     @classmethod
     def coerce_id(cls, v: Any) -> int | None:
         return _coerce_opt_int(v)
+
+    @field_validator("instruction", mode="before")
+    @classmethod
+    def coerce_instruction(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
 
     @field_validator("depends_on", mode="before")
     @classmethod
@@ -67,12 +73,14 @@ class PlanSchema(BaseModel):
     @field_validator("steps", mode="before")
     @classmethod
     def coerce(cls, v: Any) -> list[dict]:
-        # 旧形式 list[str] / 各種キー名 / 依存付き dict を一様な {description, depends_on} へ。
-        # depends_on / deps / after / requires / dependencies のいずれのキーでも依存を拾う。
+        # 旧形式 list[str] / 各種キー名 / 依存付き dict を一様な {description, instruction,
+        # depends_on} へ。depends_on / deps / after / requires / dependencies のいずれのキーでも依存を拾う。
         out: list[dict] = []
         for item in v if isinstance(v, list) else []:
             if isinstance(item, str) and item.strip():
-                out.append({"id": None, "description": item.strip(), "depends_on": []})
+                out.append(
+                    {"id": None, "description": item.strip(), "instruction": "", "depends_on": []}
+                )
             elif isinstance(item, dict):
                 desc = None
                 for k in ("description", "step", "task", "content"):
@@ -81,12 +89,20 @@ class PlanSchema(BaseModel):
                         break
                 if desc is None:
                     continue
+                instruction = item["instruction"].strip() if isinstance(item.get("instruction"), str) else ""
                 deps: list = []
                 for dk in ("depends_on", "deps", "after", "requires", "dependencies"):
                     if dk in item:
                         deps = _coerce_int_list(item.get(dk))
                         break
-                out.append({"id": item.get("id"), "description": desc, "depends_on": deps})
+                out.append(
+                    {
+                        "id": item.get("id"),
+                        "description": desc,
+                        "instruction": instruction,
+                        "depends_on": deps,
+                    }
+                )
         return out
 
 
