@@ -96,13 +96,13 @@ def make_planner_node(
         )
         # 空 description を除いた生存ステップに、LLM の元 id (無ければ間引き前の出現位置) を
         # キーとして付ける。これを基準に depends_on をリマップするため、間引き前の位置で振る。
-        survivors: list[tuple[int, str, list[int]]] = []
+        survivors: list[tuple[int, str, str, list[int]]] = []
         for pos, s in enumerate(parsed.steps, start=1):
             desc = s.description.strip()
             if not desc:
                 continue
             old_key = s.id if s.id is not None else pos
-            survivors.append((old_key, desc, s.depends_on))
+            survivors.append((old_key, desc, s.instruction, s.depends_on))
         survivors = survivors[: settings.max_plan_steps]
 
         if not survivors:
@@ -111,6 +111,7 @@ def make_planner_node(
                 {
                     "id": 1,
                     "description": goal or "ユーザーの要求に回答する",
+                    "instruction": "",
                     "depends_on": [],
                     "status": "pending",
                     "result": "",
@@ -123,18 +124,19 @@ def make_planner_node(
             # 元 id → 出現順 1..N へリマップ。これにより LLM が 0始まり/飛び番 id を出しても、
             # 間引き・max_steps 切捨てがあっても depends_on の参照が壊れない。生存ステップ外
             # (間引かれた/範囲外) を指す依存は除去する。重複 id は後勝ち (sanitize が最終防御)。
-            remap = {old_key: i + 1 for i, (old_key, _, _) in enumerate(survivors)}
+            remap = {old_key: i + 1 for i, (old_key, _, _, _) in enumerate(survivors)}
             plan = [
                 {
                     "id": i + 1,
                     "description": desc,
+                    "instruction": instruction,
                     "depends_on": [remap[d] for d in deps if d in remap],
                     "status": "pending",
                     "result": "",
                     "attempts": 0,
                     "feedback": "",
                 }
-                for i, (_, desc, deps) in enumerate(survivors)
+                for i, (_, desc, instruction, deps) in enumerate(survivors)
             ]
         sanitize_dependencies(plan)
         writer(

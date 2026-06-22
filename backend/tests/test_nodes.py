@@ -41,8 +41,9 @@ def _step(
     attempts: int = 0,
     status: str = "pending",
     feedback: str = "",
+    instruction: str | None = None,
 ) -> dict:
-    return {
+    step = {
         "id": id,
         "description": desc,
         "depends_on": depends_on or [],
@@ -51,6 +52,9 @@ def _step(
         "attempts": attempts,
         "feedback": feedback,
     }
+    if instruction is not None:
+        step["instruction"] = instruction
+    return step
 
 
 # ---- orchestrator ----
@@ -133,10 +137,12 @@ async def test_planner_builds_plan():
     node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
     out = await node({"goal": LONG_GOAL}, {})
     assert [s["description"] for s in out["plan"]] == ["天気を調べる", "比較表を作る"]
-    # 旧形式 (list[str]) は依存なしの並列ステップとして取り込まれる
+    # 旧形式 (list[str]) は依存なしの並列ステップとして取り込まれる。instruction は空
+    # (executor が description にフォールバックする)。
     assert out["plan"][0] == {
         "id": 1,
         "description": "天気を調べる",
+        "instruction": "",
         "depends_on": [],
         "status": "pending",
         "result": "",
@@ -255,6 +261,24 @@ async def test_planner_falls_back_to_single_step_plan():
     assert out["plan"][0]["depends_on"] == []
 
 
+async def test_planner_propagates_instruction_to_plan():
+    # planner は各ステップの instruction (executor 向けの具体的・パーソナライズ済み手順) を
+    # そのまま plan に伝播する。description は短い成果物名のまま保たれる。
+    model = ScriptedModel(
+        [
+            '{"steps": ['
+            '{"id": 1, "description": "カフェを探す", '
+            '"instruction": "駅近・禁煙・予算1000円以下のカフェを3件。カフェイン控えめを優先", '
+            '"depends_on": []}'
+            "]}"
+        ]
+    )
+    node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
+    out = await node({"goal": LONG_GOAL}, {})
+    assert out["plan"][0]["description"] == "カフェを探す"
+    assert "カフェイン控えめを優先" in out["plan"][0]["instruction"]
+
+
 async def test_planner_replan_increments_count_and_includes_failures():
     model = ScriptedModel(['{"steps": ["やり直す"]}'])
     node = make_planner_node(model, [], SETTINGS, FakeStore(), SCREEN)
@@ -343,6 +367,27 @@ async def test_executor_passes_dependency_results_in_prompt():
     await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
     prompt = agent.payloads[0]["messages"][0].content
     assert "Aの成果" in prompt  # 依存ステップの結果がプロンプトに渡る
+
+
+async def test_executor_prefers_instruction_over_description():
+    # executor は instruction (planner がプロファイルを反映した手順) を「今回のタスク」に使う
+    agent = ScriptedExecutorAgent(["完了"])
+    node = make_executor_node(agent, SETTINGS, SCREEN)
+    plan = [_step("カフェを探す", id=1, instruction="カフェイン控えめの店を優先すること")]
+    await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    prompt = agent.payloads[0]["messages"][0].content
+    assert "今回のタスク: カフェイン控えめの店を優先すること" in prompt
+    assert "今回のタスク: カフェを探す" not in prompt
+
+
+async def test_executor_falls_back_to_description_without_instruction():
+    # instruction 欠落 (旧 plan) なら description にフォールバックして従来どおり動く
+    agent = ScriptedExecutorAgent(["完了"])
+    node = make_executor_node(agent, SETTINGS, SCREEN)
+    plan = [_step("カフェを探す", id=1)]  # instruction なし
+    await node({"goal": LONG_GOAL, "plan": plan, "executor_runs": 0}, {})
+    prompt = agent.payloads[0]["messages"][0].content
+    assert "今回のタスク: カフェを探す" in prompt
 
 
 async def test_executor_never_raises_on_agent_failure():

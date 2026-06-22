@@ -67,6 +67,19 @@ def test_plan_schema_extracts_dependencies():
     assert [s.depends_on for s in parsed.steps] == [[], [1], [1, 2]]
 
 
+def test_plan_schema_extracts_instruction():
+    parsed = parse_json_as(
+        '{"steps": ['
+        '{"id": 1, "description": "カフェを探す", "instruction": "禁煙の店を優先", "depends_on": []}, '
+        '{"description": "まとめる"}, '  # instruction 欠落 → 空文字
+        '"報告する"'  # 旧形式 list[str] → 空文字
+        "]}",
+        PlanSchema,
+    )
+    assert parsed is not None
+    assert [s.instruction for s in parsed.steps] == ["禁煙の店を優先", "", ""]
+
+
 def test_verdict_schema_rejects_unknown_verdict():
     assert parse_json_as('{"verdict": "banana"}', VerdictSchema) is None
 

@@ -23,7 +23,11 @@ Verdict = Literal["pass", "retry", "replan", "fail"]
 
 class PlanStep(TypedDict):
     id: int
-    description: str  # 実行タスク (自然文)
+    description: str  # 実行タスク (自然文)。UI 表示・要約・依存見出し用の短い成果物名。
+    # executor 向けの具体的・パーソナライズ済み実行手順。executor はユーザープロファイルを
+    # 参照しないため、planner が制約・好みを実行条件として落とし込んでここに書く。
+    # 空/欠落なら executor は description にフォールバックする (旧 plan との後方互換)。
+    instruction: NotRequired[str]
     depends_on: list[int]  # 先行ステップ ID 群 (全て done で実行可能 / 空なら即時実行可)
     status: Literal["pending", "running", "done", "failed"]
     result: str  # 実行結果要約 (step_result_max_chars で切詰め済み / LLM・人間向けテキスト)
