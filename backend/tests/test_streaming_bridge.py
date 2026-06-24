@@ -262,7 +262,7 @@ async def test_real_graph_plan_path_end_to_end():
             [
                 AIMessage(content="PLAN"),
                 AIMessage(content='{"steps": ["調査する"]}'),
-                AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
             ]
         )
     )

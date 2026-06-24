@@ -1,5 +1,7 @@
 """各ノードの単体テスト (フェイクモデル注入、DB / Ollama なし)。"""
 
+import json
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.agent.nodes.common import (
@@ -12,7 +14,13 @@ from app.agent.nodes.executor import make_executor_node
 from app.agent.nodes.orchestrator import make_orchestrator_node
 from app.agent.nodes.planner import make_planner_node
 from app.agent.nodes.synthesizer import make_synthesizer_node
-from app.agent.parsing import DataSelectionSchema, PlanSchema, RouteSchema, VerdictSchema
+from app.agent.parsing import (
+    DataSelectionSchema,
+    PlanSchema,
+    RouteSchema,
+    RubricScores,
+    VerdictSchema,
+)
 from app.core.config import Settings
 from tests.fakes import (
     FakeScreenModel,
@@ -413,6 +421,19 @@ def _running(**kw) -> dict:
     return _step(**kw)
 
 
+# evaluator のルーブリック採点 JSON (ScriptedModel=ollama テキスト経路用)。
+# pass=満点(100)、retry=低スコア(40 < eval_pass_threshold=70)、replan=flawed フラグ。
+_VERDICT_PASS = '{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'
+_VERDICT_REPLAN = '{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": true, "feedback": "計画から見直し"}'
+
+
+def _verdict_retry(feedback: str) -> str:
+    return (
+        '{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, '
+        f'"flawed": false, "feedback": {json.dumps(feedback, ensure_ascii=False)}}}'
+    )
+
+
 async def test_evaluator_empty_result_retries_without_llm():
     model = ScriptedModel([])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
@@ -423,7 +444,7 @@ async def test_evaluator_empty_result_retries_without_llm():
 
 
 async def test_evaluator_pass_marks_done():
-    model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
+    model = ScriptedModel([_VERDICT_PASS])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="良い結果", attempts=1)]}
     out = await node(state, {})
@@ -431,7 +452,7 @@ async def test_evaluator_pass_marks_done():
 
 
 async def test_evaluator_structured_output_openai_pass():
-    model = StructuredModel([VerdictSchema(verdict="pass", feedback="")])
+    model = StructuredModel([VerdictSchema(scores=RubricScores(goal=5, accuracy=5, completeness=5))])
     node = make_evaluator_node(model, OPENAI_SETTINGS, SCREEN)
     state = {"plan": [_running(result="良い結果", attempts=1)]}
     out = await node(state, {})
@@ -440,7 +461,9 @@ async def test_evaluator_structured_output_openai_pass():
 
 
 async def test_evaluator_structured_output_openai_retry():
-    model = StructuredModel([VerdictSchema(verdict="retry", feedback="具体性が不足")])
+    model = StructuredModel(
+        [VerdictSchema(scores=RubricScores(goal=2, accuracy=2, completeness=2), feedback="具体性が不足")]
+    )
     node = make_evaluator_node(model, OPENAI_SETTINGS, SCREEN)
     state = {"plan": [_running(result="不十分", attempts=0)]}
     out = await node(state, {})
@@ -449,7 +472,7 @@ async def test_evaluator_structured_output_openai_retry():
 
 
 async def test_evaluator_separates_system_and_user_roles():
-    model = ScriptedModel(['{"verdict": "pass", "feedback": ""}'])
+    model = ScriptedModel([_VERDICT_PASS])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(desc="天気を調べる", result="晴れだった", attempts=1)]}
     await node(state, {})
@@ -462,7 +485,7 @@ async def test_evaluator_separates_system_and_user_roles():
 
 
 async def test_evaluator_retry_sets_feedback_and_pends():
-    model = ScriptedModel(['{"verdict": "retry", "feedback": "もっと具体的に"}'])
+    model = ScriptedModel([_verdict_retry("もっと具体的に")])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="不十分", attempts=1)]}
     out = await node(state, {})
@@ -471,7 +494,7 @@ async def test_evaluator_retry_sets_feedback_and_pends():
 
 
 async def test_evaluator_retry_budget_downgrades_to_fail():
-    model = ScriptedModel(['{"verdict": "retry", "feedback": "もう一度"}'])
+    model = ScriptedModel([_verdict_retry("もう一度")])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     # attempts=2 > max_step_retries=1 → fail に格下げして前進
     state = {"plan": [_running(result="不十分", attempts=2)]}
@@ -481,7 +504,7 @@ async def test_evaluator_retry_budget_downgrades_to_fail():
 
 
 async def test_evaluator_replan_sets_needs_replan():
-    model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
+    model = ScriptedModel([_VERDICT_REPLAN])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="ずれた結果", attempts=1)], "replan_count": 0}
     out = await node(state, {})
@@ -490,7 +513,7 @@ async def test_evaluator_replan_sets_needs_replan():
 
 
 async def test_evaluator_replan_budget_downgrades_to_fail():
-    model = ScriptedModel(['{"verdict": "replan", "feedback": "計画から見直し"}'])
+    model = ScriptedModel([_VERDICT_REPLAN])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {
         "plan": [_running(result="ずれた結果", attempts=1)],
@@ -503,9 +526,7 @@ async def test_evaluator_replan_budget_downgrades_to_fail():
 
 async def test_evaluator_evaluates_round_in_parallel():
     # 2ステップ同時評価。両方 pass を返す
-    model = ScriptedModel(
-        ['{"verdict": "pass", "feedback": ""}', '{"verdict": "pass", "feedback": ""}']
-    )
+    model = ScriptedModel([_VERDICT_PASS, _VERDICT_PASS])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     plan = [
         _running(id=1, result="結果1", attempts=1),
@@ -514,6 +535,28 @@ async def test_evaluator_evaluates_round_in_parallel():
     out = await node({"plan": plan}, {})
     assert [s["status"] for s in out["plan"]] == ["done", "done"]
     assert len(model.calls) == 2
+
+
+async def test_evaluator_score_threshold_decides_pass_or_retry():
+    # 4/4/3=合計11 → 73点 ≥ 70 で pass、3/3/3=60点 < 70 で retry。閾値で機械的に分岐する。
+    near_pass = '{"scores": {"goal": 4, "accuracy": 4, "completeness": 3}, "flawed": false, "feedback": ""}'
+    just_under = '{"scores": {"goal": 3, "accuracy": 3, "completeness": 3}, "flawed": false, "feedback": "もう少し"}'
+    node = make_evaluator_node(ScriptedModel([near_pass]), SETTINGS, SCREEN)
+    out = await node({"plan": [_running(result="ほぼ良い", attempts=1)]}, {})
+    assert out["plan"][0]["status"] == "done"
+
+    node = make_evaluator_node(ScriptedModel([just_under]), SETTINGS, SCREEN)
+    out = await node({"plan": [_running(result="そこそこ", attempts=0)]}, {})
+    assert out["plan"][0]["status"] == "pending"
+
+
+async def test_evaluator_threshold_is_configurable():
+    # 同じ 60点でも、閾値を 50 に下げれば pass になる (config で調整可能であることの確認)。
+    just_60 = '{"scores": {"goal": 3, "accuracy": 3, "completeness": 3}, "flawed": false, "feedback": ""}'
+    lenient = Settings(eval_pass_threshold=50)
+    node = make_evaluator_node(ScriptedModel([just_60]), lenient, SCREEN)
+    out = await node({"plan": [_running(result="そこそこ", attempts=1)]}, {})
+    assert out["plan"][0]["status"] == "done"
 
 
 async def test_evaluator_ignores_non_running_steps():
