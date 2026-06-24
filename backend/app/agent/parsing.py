@@ -106,14 +106,47 @@ class PlanSchema(BaseModel):
         return out
 
 
+class RubricScores(BaseModel):
+    """評価軸ごとの 1〜5 点。範囲外・非数値は 3 に矯正する (ローカル LLM の揺れ対策)。"""
+
+    goal: int = Field(3, ge=1, le=5)          # 目的達成度
+    accuracy: int = Field(3, ge=1, le=5)      # 正確性・根拠
+    completeness: int = Field(3, ge=1, le=5)  # 完全性
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _coerce_score(cls, v: Any) -> int:
+        try:
+            return min(5, max(1, int(v)))
+        except (TypeError, ValueError):
+            return 3
+
+
 class VerdictSchema(BaseModel):
-    verdict: Literal["pass", "retry", "replan"]
+    """evaluator のルーブリック採点結果。verdict (pass/retry/replan) は評価ノードが
+    score (0-100) と flawed からコード側で導出する — このスキーマは採点のみを持つ。"""
+
+    scores: RubricScores = Field(default_factory=RubricScores)
+    flawed: bool = False  # タスク自体が不適切 → replan
     feedback: str = ""
+
+    @field_validator("flawed", mode="before")
+    @classmethod
+    def _coerce_flawed(cls, v: Any) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() in {"true", "1", "yes"}
+        return bool(v)
 
     @field_validator("feedback", mode="before")
     @classmethod
     def coerce_feedback(cls, v: Any) -> str:
         return v if isinstance(v, str) else ""
+
+    @property
+    def score(self) -> int:
+        """0-100 に正規化した総合スコア (満点=100 / 全3点=60)。"""
+        total = self.scores.goal + self.scores.accuracy + self.scores.completeness
+        return round(total / 15 * 100)
 
 
 class RouteSchema(BaseModel):

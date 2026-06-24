@@ -94,8 +94,8 @@ async def test_plan_path_runs_full_loop():
                 [
                     AIMessage(content="PLAN"),
                     AIMessage(content='{"steps": ["天気を調べる", "比較表を作る"]}'),
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
                 ]
             )
         ),
@@ -146,7 +146,7 @@ async def test_scratch_state_resets_between_turns():
                 [
                     AIMessage(content="PLAN"),
                     AIMessage(content='{"steps": ["調べる"]}'),
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
                 ]
             )
         ),
@@ -190,9 +190,9 @@ async def test_parallel_dag_execution():
                     AIMessage(content="PLAN"),
                     AIMessage(content=dag_plan),
                     # round1: ステップ1,2 を並列評価 / round2: ステップ3 を評価
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
-                    AIMessage(content='{"verdict": "pass", "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
+                    AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
                 ]
             )
         ),
@@ -223,9 +223,9 @@ async def test_global_budget_terminates_retry_loop():
                 [
                     AIMessage(content="PLAN"),
                     AIMessage(content='{"steps": ["終わらないタスク"]}'),
-                    AIMessage(content='{"verdict": "retry", "feedback": "やり直し"}'),
-                    AIMessage(content='{"verdict": "retry", "feedback": "やり直し"}'),
-                    AIMessage(content='{"verdict": "retry", "feedback": "やり直し"}'),
+                    AIMessage(content='{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "やり直し"}'),
+                    AIMessage(content='{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "やり直し"}'),
+                    AIMessage(content='{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "やり直し"}'),
                 ]
             )
         ),

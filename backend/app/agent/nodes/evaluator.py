@@ -20,7 +20,7 @@ from app.agent.nodes.common import (
     safe_stream_writer,
     screen_step_data,
 )
-from app.agent.parsing import VerdictSchema, structured_or_parse
+from app.agent.parsing import RubricScores, VerdictSchema, structured_or_parse
 from app.agent.prompts import EVALUATOR_SYSTEM, evaluator_user
 from app.core.config import Settings
 
@@ -37,13 +37,14 @@ def make_evaluator_node(model, settings: Settings, screen_model):
 
         replan_budget_left = state.get("replan_count", 0) < settings.max_replans
 
-        async def eval_one(idx: int) -> tuple[int, str, str]:
+        async def eval_one(idx: int) -> tuple[int, str, str, int]:
             # 例外を漏らさない契約 (executor.run_one と対称)。gather は return_exceptions=False の
             # ため、1件でも例外を出すと他コルーチンを巻き込んで node 全体が落ち、executor が
             # running にしたステップ群が未確定のまま消える。想定外の例外も pass で前進させる。
             step = plan[idx]
             try:
                 result = step.get("result") or ""
+                score = 0  # プレチェック retry / fail 経路ではスコアなし (可観測性用に 0)
                 # 決定論プレチェック (LLM スキップ)
                 if not result.strip() or result.startswith(EXECUTION_FAILED_MARKER):
                     verdict, feedback = (
@@ -72,18 +73,27 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                         ],
                         VerdictSchema,
                         use_structured=settings.supports_structured_output,
-                        fallback=VerdictSchema(verdict="pass", feedback=""),
+                        # 前進フォールバック: 評価器が壊れても完走するよう満点 pass にする。
+                        fallback=VerdictSchema(scores=RubricScores(goal=5, accuracy=5, completeness=5)),
                     )
-                    verdict, feedback = parsed.verdict, parsed.feedback
+                    # ルーブリック採点 → verdict をコード側で導出 (閾値は決定論的でブレない)。
+                    score = parsed.score
+                    feedback = parsed.feedback
+                    if parsed.flawed:
+                        verdict = "replan"
+                    elif score >= settings.eval_pass_threshold:
+                        verdict = "pass"
+                    else:
+                        verdict = "retry"
                 # 予算ダウングレード (決定論コード — 停止性の保証)
                 if verdict == "retry" and step.get("attempts", 0) > settings.max_step_retries:
                     verdict = "fail"
                 if verdict == "replan" and not replan_budget_left:
                     verdict = "fail"
-                return idx, verdict, feedback
+                return idx, verdict, feedback, score
             except Exception:
                 logger.exception("ステップ評価に失敗したため pass で前進します (step=%s)", step.get("id"))
-                return idx, "pass", ""
+                return idx, "pass", "", 0
 
         verdicts = await asyncio.gather(*(eval_one(i) for i in running))
 
@@ -95,7 +105,7 @@ def make_evaluator_node(model, settings: Settings, screen_model):
             desc = (step.get("description") or "")[:100]
             return f"ステップ{step.get('id')}「{desc}」: {feedback[:200] or '達成できませんでした'}"
 
-        for idx, verdict, feedback in verdicts:
+        for idx, verdict, feedback, score in verdicts:
             step = plan[idx]
             if verdict == "pass":
                 step["status"] = "done"
@@ -111,10 +121,11 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                 failure_notes.append(_note(step, feedback))
             writer(
                 {
-                    "status": f"ステップ {step['id']} を評価: {verdict}",
+                    "status": f"ステップ {step['id']} を評価: {verdict} ({score}点)",
                     "phase": "evaluate",
                     "step": step["id"],
                     "verdict": verdict,
+                    "score": score,
                 }
             )
 

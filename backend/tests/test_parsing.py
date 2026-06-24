@@ -13,6 +13,9 @@ from app.agent.parsing import (
 )
 from tests.fakes import ScriptedModel, StructuredModel
 
+# VerdictSchema は採点のみを持つ (verdict 文字列は評価ノードがスコアから導出する)。
+_PASS_JSON = '{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'
+
 
 def test_strip_think():
     assert strip_think("<think>内部思考</think>PLAN") == "PLAN"
@@ -80,26 +83,43 @@ def test_plan_schema_extracts_instruction():
     assert [s.instruction for s in parsed.steps] == ["禁煙の店を優先", "", ""]
 
 
-def test_verdict_schema_rejects_unknown_verdict():
-    assert parse_json_as('{"verdict": "banana"}', VerdictSchema) is None
-
-
-def test_verdict_schema_coerces_missing_feedback():
-    parsed = parse_json_as('{"verdict": "retry", "feedback": null}', VerdictSchema)
+def test_verdict_schema_clamps_out_of_range_scores():
+    # 範囲外スコア (0, 9) と非数値はクランプ / 3 へ矯正されてパースが通る。
+    parsed = parse_json_as(
+        '{"scores": {"goal": 9, "accuracy": 0, "completeness": "x"}, "feedback": ""}',
+        VerdictSchema,
+    )
     assert parsed is not None
-    assert parsed.verdict == "retry"
+    assert (parsed.scores.goal, parsed.scores.accuracy, parsed.scores.completeness) == (5, 1, 3)
+
+
+def test_verdict_schema_score_normalized_to_100():
+    parsed = parse_json_as(
+        '{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "feedback": ""}',
+        VerdictSchema,
+    )
+    assert parsed is not None and parsed.score == 100
+
+
+def test_verdict_schema_coerces_missing_feedback_and_flawed():
+    parsed = parse_json_as(
+        '{"scores": {"goal": 4, "accuracy": 4, "completeness": 4}, "flawed": "true", "feedback": null}',
+        VerdictSchema,
+    )
+    assert parsed is not None
+    assert parsed.flawed is True
     assert parsed.feedback == ""
 
 
 async def test_parse_with_retry_recovers_on_second_attempt():
-    model = ScriptedModel(["これはJSONではない", '{"verdict": "pass", "feedback": ""}'])
+    model = ScriptedModel(["これはJSONではない", _PASS_JSON])
     result = await parse_with_retry(
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
-        fallback=VerdictSchema(verdict="retry", feedback="fb"),
+        fallback=VerdictSchema(feedback="fb"),
     )
-    assert result.verdict == "pass"
+    assert result.score == 100
     assert len(model.calls) == 2
     # リトライ時に修正指示が追記されている
     assert any("JSONとして不正" in m.content for m in model.calls[1])
@@ -111,9 +131,9 @@ async def test_parse_with_retry_returns_fallback_when_all_fail():
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
-        fallback=VerdictSchema(verdict="pass", feedback=""),
+        fallback=VerdictSchema(feedback="fallback"),
     )
-    assert result.verdict == "pass"
+    assert result.feedback == "fallback"
 
 
 async def test_parse_with_retry_survives_model_exceptions():
@@ -131,14 +151,14 @@ async def test_parse_with_retry_survives_model_exceptions():
 
 
 async def test_structured_or_parse_uses_structured_output():
-    want = VerdictSchema(verdict="pass", feedback="ok")
+    want = VerdictSchema(feedback="ok")
     model = StructuredModel([want])
     result = await structured_or_parse(
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
         use_structured=True,
-        fallback=VerdictSchema(verdict="retry", feedback=""),
+        fallback=VerdictSchema(feedback=""),
     )
     assert result is want
     assert model.bound_schema is VerdictSchema
@@ -146,39 +166,42 @@ async def test_structured_or_parse_uses_structured_output():
 
 async def test_structured_or_parse_falls_back_to_text_parse_on_error():
     # 構造化出力が例外 → parse_with_retry (テキスト) へフォールバックして JSON を拾う
-    model = StructuredModel([RuntimeError("schema 非対応"), '{"verdict": "retry", "feedback": "x"}'])
+    retry_json = '{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "x"}'
+    model = StructuredModel([RuntimeError("schema 非対応"), retry_json])
     result = await structured_or_parse(
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
         use_structured=True,
-        fallback=VerdictSchema(verdict="pass", feedback=""),
+        fallback=VerdictSchema(),
     )
-    assert result.verdict == "retry"
+    assert result.feedback == "x"
 
 
 async def test_structured_or_parse_falls_back_on_wrong_type():
     # 1要素目=schema 非インスタンス(dict) → 型不一致でテキストパースへ。2要素目=JSON文字列を拾う。
-    model = StructuredModel([{"verdict": "retry"}, '{"verdict": "replan", "feedback": "z"}'])
+    replan_json = '{"scores": {"goal": 1, "accuracy": 1, "completeness": 1}, "flawed": true, "feedback": "z"}'
+    model = StructuredModel([{"feedback": "retry"}, replan_json])
     result = await structured_or_parse(
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
         use_structured=True,
-        fallback=VerdictSchema(verdict="pass", feedback=""),
+        fallback=VerdictSchema(),
     )
-    assert result.verdict == "replan"
+    assert result.flawed is True
     assert len(model.calls) == 2  # structured 1回 + parse_with_retry 1回
 
 
 async def test_structured_or_parse_text_path_when_disabled():
     # use_structured=False: with_structured_output を呼ばず parse_with_retry を使う
-    model = ScriptedModel(['{"verdict": "replan", "feedback": "y"}'])
+    replan_json = '{"scores": {"goal": 1, "accuracy": 1, "completeness": 1}, "flawed": true, "feedback": "y"}'
+    model = ScriptedModel([replan_json])
     result = await structured_or_parse(
         model,
         [HumanMessage(content="判定して")],
         VerdictSchema,
         use_structured=False,
-        fallback=VerdictSchema(verdict="pass", feedback=""),
+        fallback=VerdictSchema(),
     )
-    assert result.verdict == "replan"
+    assert result.flawed is True

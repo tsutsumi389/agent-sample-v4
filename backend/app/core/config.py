@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # ハードリミット (無限ループ防止)
     max_plan_steps: int = Field(5, ge=1)  # 計画ステップ数上限 (超過切捨て)
     max_step_retries: int = Field(1, ge=0)  # 同一ステップの retry 上限
+    eval_pass_threshold: int = Field(70, ge=0, le=100)  # 評価スコア(0-100)がこの点未満なら retry で再実行
     max_replans: int = Field(1, ge=0)  # planner 再突入上限
     max_executor_runs: int = Field(8, ge=1)  # 大域停止条件 (実行ステップ数の累計上限)
     max_parallel_executors: int = Field(3, ge=1)  # 1ラウンドで同時実行する executor 数の上限
