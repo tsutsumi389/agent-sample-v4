@@ -94,10 +94,13 @@ PLANNER_REPLAN_SECTION = """\
 EVALUATOR_SYSTEM = """\
 あなたはタスク評価者です。与えられたタスクと実行結果を、以下の評価軸で採点してください。
 
+<task> は成果物の短い名前、<instruction> は実行者が満たすべき具体的な実行手順・要件
+(制約・除外条件・優先順位を含む) です。<instruction> が合格基準の本体であり、採点はこれを基準に行うこと。
+
 評価軸 (各 1〜5 点。結果とデータのみに基づき独立に採点):
-- goal (目的達成度): タスクの目的をどれだけ達成しているか。5=完全達成 / 3=部分的 / 1=未達成。
-- accuracy (正確性・根拠): 結果が正確で、提示データ(ツール出力)に裏付けられているか。5=全て根拠あり / 3=一部不確か / 1=誤り・根拠なし。
-- completeness (完全性): 必要な要素が漏れなく揃っているか。5=漏れなし / 3=一部欠落 / 1=大半が欠落。
+- goal (目的達成度): <instruction> の目的をどれだけ達成しているか。5=完全達成 / 3=部分的 / 1=未達成。
+- accuracy (正確性・根拠): 結果が正確で、提示データ(ツール出力)に裏付けられているか。また <instruction> の制約・除外条件 (「〜のみ」「〜を避ける」等) に違反していないか。5=全て根拠あり・違反なし / 3=一部不確か / 1=誤り・根拠なし・制約違反。
+- completeness (完全性): <instruction> が要求する要素が漏れなく揃っているか。5=漏れなし / 3=一部欠落 / 1=大半が欠落。
 
 ルール:
 - 5点未満の軸がある場合は、feedback に「どの軸が・なぜ低いか・どう直すか」を具体的に書く (再実行の指示になる)。
@@ -114,6 +117,9 @@ EVALUATOR_USER = """\
 <task>
 {step_description}
 </task>
+<instruction>
+{step_instruction}
+</instruction>
 <result>
 {result}
 </result>
@@ -234,9 +240,12 @@ def planner_user(goal: str, tool_catalog: str, replan_section: str) -> str:
     )
 
 
-def evaluator_user(step_description: str, result: str, data: str = "") -> str:
+def evaluator_user(
+    step_description: str, step_instruction: str, result: str, data: str = ""
+) -> str:
     return EVALUATOR_USER.format(
         step_description=_isolate(step_description),
+        step_instruction=_isolate(step_instruction),
         result=_isolate(result),
         data=_isolate(data),
     )

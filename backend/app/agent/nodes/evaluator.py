@@ -56,7 +56,10 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                     screened = await screen_step_data(
                         screen_model,
                         step.get("data"),
-                        purpose=f"ステップ「{step['description']}」の実行結果が目的を達成しているかの評価",
+                        purpose=(
+                            f"ステップ「{step['description']}」(要件: {step.get('instruction') or '—'})"
+                            "の実行結果が目的・制約を満たしているかの評価"
+                        ),
                         settings=settings,
                     )
                     parsed = await structured_or_parse(
@@ -66,6 +69,7 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                             HumanMessage(
                                 content=evaluator_user(
                                     step_description=step["description"],
+                                    step_instruction=step.get("instruction") or "",
                                     result=result,
                                     data=format_step_data(screened),
                                 )
