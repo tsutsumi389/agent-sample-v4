@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.config import get_stream_writer
 
 from app.agent.parsing import (
@@ -36,6 +36,36 @@ def last_human_text(state: dict) -> str:
         if isinstance(msg, HumanMessage):
             return content_to_text(msg.content)
     return ""
+
+
+def recent_history_text(state: dict) -> str:
+    """最新の HumanMessage (= 今ターンの入力) より前の会話履歴を役割ラベル付きで整形する。
+
+    ユーザー発話とアシスタント最終回答だけを拾う (tool_call のみで本文のない中間 AIMessage・
+    ToolMessage は除外)。履歴なしは ""。値は信頼できないデータのため整形のみ (隔離は prompts 層)。
+
+    現状は最新 Human より前の全履歴を渡す。最大ターン数・1発話の切詰めは将来必要になれば導入する。
+    """
+    msgs = state.get("messages") or []
+    # 今ターンの HumanMessage を境界に、それより前だけを履歴対象とする
+    boundary = len(msgs)
+    for i in range(len(msgs) - 1, -1, -1):
+        if isinstance(msgs[i], HumanMessage):
+            boundary = i
+            break
+    lines: list[str] = []
+    for m in msgs[:boundary]:
+        if isinstance(m, HumanMessage):
+            label = "ユーザー"
+        elif isinstance(m, AIMessage):
+            label = "アシスタント"
+        else:
+            continue  # ToolMessage 等は除外
+        text = content_to_text(m.content).strip()
+        if not text:
+            continue  # tool_call のみで本文のない中間 AIMessage を除外
+        lines.append(f"{label}: {text}")
+    return "\n".join(lines)
 
 
 def sanitize_dependencies(plan: list[dict]) -> None:
@@ -162,6 +192,14 @@ async def screen_step_data(
     except Exception:
         logger.exception("構造化データのスクリーニングに失敗したため全量を渡します")
         return data
+
+
+def format_feedback_history(history: list[str]) -> str:
+    """retry 毎の評価者指摘の履歴を、古い順に番号付きで1本のテキストへ整形する。
+
+    executor (全指摘の改善) と evaluator (全指摘の反映度評価) の両方が同じ体裁で読む。
+    末尾の番号が最新の指摘。空履歴なら "" を返す。"""
+    return "\n".join(f"{i}. {fb}" for i, fb in enumerate(history, 1) if fb)
 
 
 def ready_step_indices(plan: list[dict]) -> list[int]:

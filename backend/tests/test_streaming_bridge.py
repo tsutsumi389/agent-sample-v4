@@ -260,7 +260,7 @@ async def test_real_graph_plan_path_end_to_end():
     control = GenericFakeChatModel(
         messages=iter(
             [
-                AIMessage(content="PLAN"),
+                AIMessage(content='{"route": "plan", "goal": "対象を調査する"}'),
                 AIMessage(content='{"steps": ["調査する"]}'),
                 AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
             ]

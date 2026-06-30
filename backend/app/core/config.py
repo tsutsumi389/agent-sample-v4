@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     executor_recursion_limit: int = Field(12, ge=2)  # executor サブグラフ内 ReAct 反復上限
     graph_recursion_limit: int = Field(80, ge=10)  # 親グラフ recursion_limit (二重防御)
     # コンテキスト管理 (num_ctx に収めるための切詰め)
-    router_skip_under_chars: int = 20  # これ未満の入力は LLM 分類スキップで direct
+    router_skip_under_chars: int = 20  # これ未満かつ履歴なしの入力は LLM 分類スキップで direct
     goal_max_chars: int = 2000
     step_result_max_chars: int = 1500
     executor_history_max_chars: int = 6000

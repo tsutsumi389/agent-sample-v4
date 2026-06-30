@@ -150,11 +150,28 @@ class VerdictSchema(BaseModel):
 
 
 class RouteSchema(BaseModel):
-    """orchestrator のルーティング判定 (構造化出力用)。"""
+    """orchestrator のルーティング判定 + 文脈反映済み goal (構造化出力用)。"""
 
     route: Literal["direct", "plan"] = Field(
-        description="direct=1回の回答や1〜2ツールで完結する単純な要求 / plan=多段・複数ツールの複雑な要求"
+        "direct",
+        description="direct=1回の回答や1〜2ツールで完結する単純な要求 / plan=多段・複数ツールの複雑な要求",
     )
+    goal: str = Field(
+        "",
+        description="会話履歴の指示語・省略を補完した自己完結な要求文。補完不要ならユーザー入力のまま。",
+    )
+
+    @field_validator("route", mode="before")
+    @classmethod
+    def coerce_route(cls, v: Any) -> str:
+        # 想定外値・大文字・欠落は安全側で direct (plan のみ plan)
+        s = str(v).strip().lower() if v is not None else "direct"
+        return "plan" if s == "plan" else "direct"
+
+    @field_validator("goal", mode="before")
+    @classmethod
+    def coerce_goal(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
 
 
 class EntrySelectionSchema(BaseModel):

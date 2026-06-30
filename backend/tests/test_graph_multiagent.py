@@ -92,7 +92,8 @@ async def test_plan_path_runs_full_loop():
         control=GenericFakeChatModel(
             messages=iter(
                 [
-                    AIMessage(content="PLAN"),
+                    # orchestrator は route + 文脈化 goal を JSON で返す
+                    AIMessage(content='{"route": "plan", "goal": "東京と大阪の天気と所要時間を比較表にまとめる"}'),
                     AIMessage(content='{"steps": ["天気を調べる", "比較表を作る"]}'),
                     AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
                     AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
@@ -122,7 +123,7 @@ async def test_all_llm_outputs_broken_still_reaches_end():
         messages=cycle([AIMessage(content="PLAN かもしれない {壊れたjson: ")])
     )
     factory = _fake_factory(
-        control=broken(),  # orchestrator は PLAN に分類 → planner/evaluator は全てパース失敗
+        control=broken(),  # orchestrator はパース全滅 → direct + 生 goal にフォールバック
         responder=broken(),
         synthesizer=broken(),
         executor=broken(),
@@ -133,7 +134,7 @@ async def test_all_llm_outputs_broken_still_reaches_end():
         config=_config(),
         context=AgentContext(user_id="u1"),
     )
-    # planner → 単一ステップ計画 / evaluator → pass 前進 / synthesizer → 出力 (壊れていても文字列)
+    # orchestrator が壊れた出力で direct へフォールバックしても、responder が (壊れていても) 文字列を返す
     final = result["messages"][-1]
     assert isinstance(final, AIMessage)
     assert final.content  # 空でない回答が必ず返る
@@ -144,9 +145,12 @@ async def test_scratch_state_resets_between_turns():
         control=GenericFakeChatModel(
             messages=iter(
                 [
-                    AIMessage(content="PLAN"),
+                    # 1ターン目: plan 分類 + plan ループ (orchestrator / planner / evaluator)
+                    AIMessage(content='{"route": "plan", "goal": "LONG_GOAL を文脈化"}'),
                     AIMessage(content='{"steps": ["調べる"]}'),
                     AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
+                    # 2ターン目: 履歴があるため短文「こんにちは」でも orchestrator が呼ばれる → direct 分類
+                    AIMessage(content='{"route": "direct", "goal": "こんにちは"}'),
                 ]
             )
         ),
@@ -173,6 +177,42 @@ async def test_scratch_state_resets_between_turns():
     assert second["messages"][-1].content == "2ターン目の回答"
 
 
+async def test_followup_goal_is_contextualized_into_state():
+    """2ターン目のフォローアップで、orchestrator が会話履歴を踏まえて goal を文脈化し、
+    その文脈化済み goal が state に載る (= 下流 plan 経路へ伝播する) ことを固定する。"""
+    factory = _fake_factory(
+        control=GenericFakeChatModel(
+            messages=iter(
+                [
+                    # 1ターン目: direct で軽く返す
+                    AIMessage(content='{"route": "direct", "goal": "Pythonのデコレータについて詳しく教えてください"}'),
+                    # 2ターン目: 「もっと例を」を履歴で補完した自己完結 goal を返す
+                    AIMessage(content='{"route": "direct", "goal": "Pythonのデコレータの例をもっと挙げる"}'),
+                ]
+            )
+        ),
+        responder=GenericFakeChatModel(
+            messages=iter([AIMessage(content="デコレータの解説"), AIMessage(content="追加の例")])
+        ),
+        synthesizer=GenericFakeChatModel(messages=iter([])),
+        executor=GenericFakeChatModel(messages=iter([])),
+    )
+    agent = _build(factory)
+    config = _config("t-ctx")
+    context = AgentContext(user_id="u1")
+
+    await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "Pythonのデコレータについて詳しく教えてください"}]},
+        config=config,
+        context=context,
+    )
+    second = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "もっと例を"}]}, config=config, context=context
+    )
+    # 生入力「もっと例を」ではなく、履歴で補完された自己完結 goal が state に載る
+    assert second["goal"] == "Pythonのデコレータの例をもっと挙げる"
+
+
 async def test_parallel_dag_execution():
     """依存DAG計画で、独立ステップ(1,2)が1ラウンドで並列実行され、依存ステップ(3)が
     その後のラウンドで実行される。全2ラウンドで executor_runs=3 に到達する。"""
@@ -187,7 +227,7 @@ async def test_parallel_dag_execution():
         control=GenericFakeChatModel(
             messages=iter(
                 [
-                    AIMessage(content="PLAN"),
+                    AIMessage(content='{"route": "plan", "goal": "東京と大阪の天気を比較する"}'),
                     AIMessage(content=dag_plan),
                     # round1: ステップ1,2 を並列評価 / round2: ステップ3 を評価
                     AIMessage(content='{"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}'),
@@ -221,7 +261,7 @@ async def test_global_budget_terminates_retry_loop():
         control=GenericFakeChatModel(
             messages=iter(
                 [
-                    AIMessage(content="PLAN"),
+                    AIMessage(content='{"route": "plan", "goal": "終わらないタスクを実行する"}'),
                     AIMessage(content='{"steps": ["終わらないタスク"]}'),
                     AIMessage(content='{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "やり直し"}'),
                     AIMessage(content='{"scores": {"goal": 2, "accuracy": 2, "completeness": 2}, "flawed": false, "feedback": "やり直し"}'),

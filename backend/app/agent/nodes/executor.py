@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.agent.nodes.common import (
     EXECUTION_FAILED_MARKER,
+    format_feedback_history,
     format_step_data,
     ready_step_indices,
     safe_stream_writer,
@@ -68,9 +69,9 @@ async def _scoped_prompt(
     # いれば description にフォールバックする (executor はプロファイル非アクセスのまま動く)。
     task = step.get("instruction") or step["description"]
     lines.append(f"今回のタスク: {task}")
-    feedback = step.get("feedback") or ""
+    feedback = format_feedback_history(step.get("feedback_history") or [])
     if feedback:
-        lines.append(f"前回試行への評価者からの指摘 (必ず改善すること): {feedback}")
+        lines.append(f"前回までの評価者からの指摘 (すべて改善すること):\n{feedback}")
     return "\n".join(lines)
 
 

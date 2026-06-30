@@ -116,7 +116,6 @@ def make_planner_node(
                     "status": "pending",
                     "result": "",
                     "attempts": 0,
-                    "feedback": "",
                 }
             ]
             logger.warning("計画の生成に失敗したため単一ステップ計画に縮退します")
@@ -134,7 +133,6 @@ def make_planner_node(
                     "status": "pending",
                     "result": "",
                     "attempts": 0,
-                    "feedback": "",
                 }
                 for i, (_, desc, instruction, deps) in enumerate(survivors)
             ]
