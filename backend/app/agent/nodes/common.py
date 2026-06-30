@@ -164,6 +164,14 @@ async def screen_step_data(
         return data
 
 
+def format_feedback_history(history: list[str]) -> str:
+    """retry 毎の評価者指摘の履歴を、古い順に番号付きで1本のテキストへ整形する。
+
+    executor (全指摘の改善) と evaluator (全指摘の反映度評価) の両方が同じ体裁で読む。
+    末尾の番号が最新の指摘。空履歴なら "" を返す。"""
+    return "\n".join(f"{i}. {fb}" for i, fb in enumerate(history, 1) if fb)
+
+
 def ready_step_indices(plan: list[dict]) -> list[int]:
     """依存 (depends_on) が全て done で、まだ実行待ち (pending) のステップの index 群。"""
     done = {s["id"] for s in plan if s.get("status") == "done"}

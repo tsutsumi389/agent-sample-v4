@@ -32,7 +32,9 @@ class PlanStep(TypedDict):
     status: Literal["pending", "running", "done", "failed"]
     result: str  # 実行結果要約 (step_result_max_chars で切詰め済み / LLM・人間向けテキスト)
     attempts: int  # このステップの executor 実行回数
-    feedback: str  # retry 時に評価者が残す、このステップ専用の改善指示
+    # retry 毎に評価者が積む、このステップ専用の改善指示の履歴 (古い→新しい)。executor は
+    # 全指摘を改善対象として読み、evaluator は再評価時に全指摘の反映度を判断材料にする。
+    feedback_history: NotRequired[list[str]]
     # ツール (content_and_artifact 形式) が返した構造化データの回収先。executor が
     # ReAct 実行中の ToolMessage.artifact を集めてここへ格納する。後続ノードは result
     # (テキスト要約) に加え、機械処理用にこちらも読む (executor の依存渡し / evaluator /

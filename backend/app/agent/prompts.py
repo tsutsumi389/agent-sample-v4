@@ -106,6 +106,13 @@ EVALUATOR_SYSTEM = """\
 - 5点未満の軸がある場合は、feedback に「どの軸が・なぜ低いか・どう直すか」を具体的に書く (再実行の指示になる)。
 - flawed: タスク説明そのものが不適切・実行不能で、やり直しではなく計画の立て直しが必要なときのみ true。通常は false。
 
+再実行時 (<prior_feedback> がある場合):
+- <prior_feedback> はこれまでの試行への指摘の履歴 (番号付き・古い順、末尾が最新) であり、
+  今回の <result> は最新の指摘を受けた再実行の結果です。
+- これまでの指摘がすべて反映されているかを accuracy・completeness の判断材料に含めること。
+  特に同じ指摘が繰り返し直っていない場合は厳しく採点すること。
+- なお 5点未満なら、feedback には過去指摘の単純な繰り返しではなく、まだ残っている問題を具体的に書くこと。
+
 出力は次の形式のJSONオブジェクトのみ。説明やコードフェンスは不要。
 {"scores": {"goal": 5, "accuracy": 5, "completeness": 5}, "flawed": false, "feedback": ""}
 
@@ -119,7 +126,7 @@ EVALUATOR_USER = """\
 </task>
 <instruction>
 {step_instruction}
-</instruction>
+</instruction>{prior_feedback_section}
 <result>
 {result}
 </result>
@@ -127,6 +134,13 @@ EVALUATOR_USER = """\
 {data}
 </data>
 """
+
+# retry の再評価時のみ EVALUATOR_USER に差し込む、前回試行への指摘ブロック。
+EVALUATOR_PRIOR_FEEDBACK_SECTION = """\
+
+<prior_feedback>
+{prior_feedback}
+</prior_feedback>"""
 
 # ---- executor (ステップ実行) ----
 EXECUTOR_PROMPT = """\
@@ -241,13 +255,24 @@ def planner_user(goal: str, tool_catalog: str, replan_section: str) -> str:
 
 
 def evaluator_user(
-    step_description: str, step_instruction: str, result: str, data: str = ""
+    step_description: str,
+    step_instruction: str,
+    result: str,
+    data: str = "",
+    prior_feedback: str = "",
 ) -> str:
+    # 前回指摘は評価者LLM由来の信頼できないデータ扱い。retry 時のみセクションを差し込む。
+    section = (
+        EVALUATOR_PRIOR_FEEDBACK_SECTION.format(prior_feedback=_isolate(prior_feedback))
+        if prior_feedback.strip()
+        else ""
+    )
     return EVALUATOR_USER.format(
         step_description=_isolate(step_description),
         step_instruction=_isolate(step_instruction),
         result=_isolate(result),
         data=_isolate(data),
+        prior_feedback_section=section,
     )
 
 

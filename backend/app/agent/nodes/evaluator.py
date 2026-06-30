@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent.nodes.common import (
     EXECUTION_FAILED_MARKER,
+    format_feedback_history,
     format_step_data,
     safe_stream_writer,
     screen_step_data,
@@ -62,6 +63,9 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                         ),
                         settings=settings,
                     )
+                    # この時点の feedback_history は過去 retry の全指摘 (追記は後段 line 112-)。
+                    # 再評価では全指摘を評価者へ渡し、各指摘の反映度の判断材料にする。
+                    prior_feedback = format_feedback_history(step.get("feedback_history") or [])
                     parsed = await structured_or_parse(
                         model,
                         [
@@ -72,6 +76,7 @@ def make_evaluator_node(model, settings: Settings, screen_model):
                                     step_instruction=step.get("instruction") or "",
                                     result=result,
                                     data=format_step_data(screened),
+                                    prior_feedback=prior_feedback,
                                 )
                             ),
                         ],
@@ -112,11 +117,13 @@ def make_evaluator_node(model, settings: Settings, screen_model):
         for idx, verdict, feedback, score in verdicts:
             step = plan[idx]
             if verdict == "pass":
-                step["status"] = "done"
-                step["feedback"] = ""
+                step["status"] = "done"  # done は再評価されないため履歴はそのまま残す
             elif verdict == "retry":
                 step["status"] = "pending"  # 次ラウンドで再実行 (依存は既に done)
-                step["feedback"] = feedback[: settings.feedback_max_chars]
+                # 今回の指摘を履歴へ積む。次回 executor は全指摘を、evaluator は全反映度を見る。
+                history = list(step.get("feedback_history") or [])
+                history.append(feedback[: settings.feedback_max_chars])
+                step["feedback_history"] = history
             elif verdict == "replan":
                 needs_replan = True
                 failure_notes.append(_note(step, feedback))  # status は running (再計画で置換)

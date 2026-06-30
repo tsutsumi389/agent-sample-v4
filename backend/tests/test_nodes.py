@@ -48,7 +48,7 @@ def _step(
     result: str = "",
     attempts: int = 0,
     status: str = "pending",
-    feedback: str = "",
+    feedback_history: list[str] | None = None,
     instruction: str | None = None,
 ) -> dict:
     step = {
@@ -58,8 +58,9 @@ def _step(
         "status": status,
         "result": result,
         "attempts": attempts,
-        "feedback": feedback,
     }
+    if feedback_history is not None:
+        step["feedback_history"] = feedback_history
     if instruction is not None:
         step["instruction"] = instruction
     return step
@@ -155,7 +156,6 @@ async def test_planner_builds_plan():
         "status": "pending",
         "result": "",
         "attempts": 0,
-        "feedback": "",
     }
 
 
@@ -468,7 +468,7 @@ async def test_evaluator_structured_output_openai_retry():
     state = {"plan": [_running(result="不十分", attempts=0)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "pending"
-    assert out["plan"][0]["feedback"] == "具体性が不足"
+    assert out["plan"][0]["feedback_history"] == ["具体性が不足"]
 
 
 async def test_evaluator_separates_system_and_user_roles():
@@ -484,13 +484,43 @@ async def test_evaluator_separates_system_and_user_roles():
     assert "天気を調べる" in human.content and "晴れだった" in human.content
 
 
+async def test_evaluator_includes_all_prior_feedback_on_retry():
+    # 過去の全指摘を持つステップ (= retry 再評価) を評価すると、評価プロンプトに全指摘が入る。
+    model = ScriptedModel([_VERDICT_PASS])
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
+    state = {"plan": [_running(result="改善した結果", feedback_history=["指摘A", "指摘B"], attempts=2)]}
+    await node(state, {})
+    _, human = model.calls[0]
+    assert "<prior_feedback>" in human.content
+    assert "指摘A" in human.content and "指摘B" in human.content
+
+
+async def test_evaluator_accumulates_feedback_across_retries():
+    # retry のたびに新しい指摘が履歴へ積まれる (既存指摘は消えない)。
+    model = ScriptedModel([_verdict_retry("指摘B")])
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
+    state = {"plan": [_running(result="まだ不十分", feedback_history=["指摘A"], attempts=1)]}
+    out = await node(state, {})
+    assert out["plan"][0]["feedback_history"] == ["指摘A", "指摘B"]
+
+
+async def test_evaluator_omits_prior_feedback_on_first_eval():
+    # 初回評価 (履歴なし) では prior_feedback セクションを差し込まない。
+    model = ScriptedModel([_VERDICT_PASS])
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
+    state = {"plan": [_running(result="良い結果", attempts=1)]}
+    await node(state, {})
+    _, human = model.calls[0]
+    assert "<prior_feedback>" not in human.content
+
+
 async def test_evaluator_retry_sets_feedback_and_pends():
     model = ScriptedModel([_verdict_retry("もっと具体的に")])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
     state = {"plan": [_running(result="不十分", attempts=1)]}
     out = await node(state, {})
     assert out["plan"][0]["status"] == "pending"
-    assert out["plan"][0]["feedback"] == "もっと具体的に"
+    assert out["plan"][0]["feedback_history"] == ["もっと具体的に"]
 
 
 async def test_evaluator_retry_budget_downgrades_to_fail():
