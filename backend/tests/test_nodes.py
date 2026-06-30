@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.agent.nodes.common import (
     EXECUTION_FAILED_MARKER,
     apply_data_selection,
+    recent_history_text,
     screen_step_data,
 )
 from app.agent.nodes.evaluator import make_evaluator_node
@@ -78,7 +79,8 @@ async def test_orchestrator_short_input_skips_llm():
 
 
 async def test_orchestrator_classifies_plan():
-    model = ScriptedModel(["<think>複雑そう</think>PLAN"])
+    # ollama 経路は JSON テキストパース (think ブロックは除去される)。route と goal を両取り。
+    model = ScriptedModel(['<think>複雑そう</think>{"route": "plan", "goal": "東京と大阪の天気を比較"}'])
     node = make_orchestrator_node(model, SETTINGS)
     out = await node(_human_state(LONG_GOAL), {})
     assert out["route"] == "plan"
@@ -136,6 +138,119 @@ async def test_orchestrator_resets_scratch():
     assert out["replan_count"] == 0
     assert out["needs_replan"] is False
     assert out["failure_notes"] == []
+
+
+# orchestrator: 会話履歴を踏まえた goal 文脈化
+
+
+def _history_state(history_msgs: list, current: str) -> dict:
+    """履歴 + 今ターンの HumanMessage を持つ state を作る。"""
+    return {"messages": [*history_msgs, HumanMessage(content=current)]}
+
+
+async def test_orchestrator_short_followup_with_history_calls_llm():
+    # 履歴があれば短文フォローアップでも LLM を通して文脈化する (skip しない)。
+    model = ScriptedModel(['{"route": "plan", "goal": "Pythonのデコレータの例をもっと挙げる"}'])
+    node = make_orchestrator_node(model, SETTINGS)
+    state = _history_state(
+        [HumanMessage(content="Pythonのデコレータを教えて"), AIMessage(content="デコレータは関数を…")],
+        "もっと例を",  # 20文字未満だが履歴あり
+    )
+    out = await node(state, {})
+    assert model.calls != []  # スキップされず LLM が呼ばれた
+    assert out["route"] == "plan"
+    assert out["goal"] == "Pythonのデコレータの例をもっと挙げる"  # リライト採用
+
+
+async def test_orchestrator_short_first_turn_skips_llm():
+    # 履歴なしの短文 (初回挨拶) は従来どおり LLM を呼ばず direct。
+    model = ScriptedModel([])  # 呼ばれたら raise
+    node = make_orchestrator_node(model, SETTINGS)
+    out = await node(_human_state("やあ"), {})
+    assert out["route"] == "direct"
+    assert model.calls == []
+
+
+async def test_orchestrator_rewrites_goal_via_history_openai():
+    model = StructuredModel([RouteSchema(route="direct", goal="東京の明日の天気を教えて")])
+    node = make_orchestrator_node(model, OPENAI_SETTINGS)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["goal"] == "東京の明日の天気を教えて"  # 文脈反映済み goal を採用
+    assert out["route"] == "direct"
+
+
+async def test_orchestrator_blank_rewrite_falls_back_to_raw_goal():
+    model = StructuredModel([RouteSchema(route="plan", goal="")])
+    node = make_orchestrator_node(model, OPENAI_SETTINGS)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["goal"] == LONG_GOAL  # 空リライトは生 goal にフォールバック
+    assert out["route"] == "plan"
+
+
+async def test_orchestrator_oversized_rewrite_falls_back_to_raw_goal():
+    huge = "あ" * (OPENAI_SETTINGS.goal_max_chars + 50)
+    model = StructuredModel([RouteSchema(route="direct", goal=huge)])
+    node = make_orchestrator_node(model, OPENAI_SETTINGS)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["goal"] == LONG_GOAL  # 過長リライトは棄却し生 goal を維持
+
+
+async def test_orchestrator_ollama_parses_route_and_goal_from_json():
+    model = ScriptedModel(['{"route": "plan", "goal": "文脈反映済みの要求"}'])
+    node = make_orchestrator_node(model, SETTINGS)
+    out = await node(_human_state(LONG_GOAL), {})
+    assert out["route"] == "plan"
+    assert out["goal"] == "文脈反映済みの要求"
+
+
+async def test_orchestrator_history_in_human_message():
+    model = ScriptedModel(['{"route": "direct", "goal": "x"}'])
+    node = make_orchestrator_node(model, SETTINGS)
+    state = _history_state(
+        [HumanMessage(content="デコレータの話"), AIMessage(content="デコレータの解説")],
+        "もっと詳しく説明して",
+    )
+    await node(state, {})
+    _, human = model.calls[0]
+    assert "conversation_history" in human.content  # 履歴セクションが User 側に隔離されて入る
+    assert "デコレータの解説" in human.content
+
+
+# ---- recent_history_text ----
+
+
+async def test_recent_history_excludes_current_human():
+    state = _history_state(
+        [HumanMessage(content="前の質問"), AIMessage(content="前の回答")],
+        "今の質問",
+    )
+    out = recent_history_text(state)
+    assert "前の質問" in out and "前の回答" in out
+    assert "今の質問" not in out  # 今ターンの入力は履歴に含めない
+
+
+async def test_recent_history_skips_tool_and_empty_ai():
+    from langchain_core.messages import ToolMessage
+
+    state = {
+        "messages": [
+            HumanMessage(content="調べて"),
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "t1"}]),
+            ToolMessage(content="ツール結果", tool_call_id="t1"),
+            AIMessage(content="調べた結果です"),
+            HumanMessage(content="今の質問"),
+        ]
+    }
+    out = recent_history_text(state)
+    assert "ユーザー: 調べて" in out
+    assert "アシスタント: 調べた結果です" in out
+    assert "ツール結果" not in out  # ToolMessage は除外
+    assert out.count("アシスタント:") == 1  # 本文空の中間 AIMessage は除外
+
+
+async def test_recent_history_empty_when_no_prior():
+    # 今ターンの HumanMessage のみ (履歴なし) → ""
+    assert recent_history_text(_human_state("最初の質問")) == ""
 
 
 # ---- planner ----
