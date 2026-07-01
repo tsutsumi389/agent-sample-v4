@@ -638,11 +638,43 @@ async def test_evaluator_retry_sets_feedback_and_pends():
     assert out["plan"][0]["feedback_history"] == ["もっと具体的に"]
 
 
-async def test_evaluator_retry_budget_downgrades_to_fail():
+async def test_evaluator_retry_budget_escalates_to_replan():
     model = ScriptedModel([_verdict_retry("もう一度")])
     node = make_evaluator_node(model, SETTINGS, SCREEN)
-    # attempts=2 > max_step_retries=1 → fail に格下げして前進
-    state = {"plan": [_running(result="不十分", attempts=2)]}
+    # attempts=2 > max_step_retries=1 かつ replan 予算あり → replan へエスカレーション。
+    # ステップは running のまま (再計画で置換)、needs_replan と failure_notes が立つ。
+    state = {"plan": [_running(result="不十分", attempts=2)], "replan_count": 0}
+    out = await node(state, {})
+    assert out["needs_replan"] is True
+    assert out["plan"][0]["status"] == "running"
+    assert out["failure_notes"]
+
+
+async def test_evaluator_replan_note_includes_attempts_and_full_feedback():
+    # retry 上限到達で replan する際、planner へ渡す failure_note に試行回数と過去の全指摘
+    # (履歴 + 今回の指摘) が言語化されること。
+    model = ScriptedModel([_verdict_retry("まだ数値の根拠が無い")])
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
+    state = {
+        "plan": [_running(result="不十分", feedback_history=["出典が不明", "単位が不揃い"], attempts=2)],
+        "replan_count": 0,
+    }
+    out = await node(state, {})
+    note = out["failure_notes"][0]
+    assert "2回試行" in note  # 試行回数を言語化
+    assert "出典が不明" in note and "単位が不揃い" in note  # 過去指摘の履歴
+    assert "まだ数値の根拠が無い" in note  # 今回の指摘
+    assert "立て直す" in note  # 別アプローチへの誘導
+
+
+async def test_evaluator_retry_budget_downgrades_to_fail_when_no_replan_budget():
+    model = ScriptedModel([_verdict_retry("もう一度")])
+    node = make_evaluator_node(model, SETTINGS, SCREEN)
+    # retry 上限到達 かつ replan 予算も尽きている → fail に格下げして前進
+    state = {
+        "plan": [_running(result="不十分", attempts=2)],
+        "replan_count": SETTINGS.max_replans,
+    }
     out = await node(state, {})
     assert out["plan"][0]["status"] == "failed"
     assert out["failure_notes"]
